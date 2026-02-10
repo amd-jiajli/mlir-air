@@ -1,0 +1,1010 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MLIR Browser - Interactive IR Visualization</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+            background: #1e1e1e;
+            color: #d4d4d4;
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+        }
+
+        /* Header */
+        header {
+            background: #2d2d2d;
+            padding: 12px 20px;
+            border-bottom: 1px solid #404040;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        header h1 {
+            font-size: 18px;
+            font-weight: 600;
+            color: #569cd6;
+        }
+
+        header h1 span {
+            color: #9cdcfe;
+        }
+
+        .header-info {
+            font-size: 13px;
+            color: #808080;
+        }
+
+        /* Main container */
+        .container {
+            display: flex;
+            flex: 1;
+            overflow: hidden;
+        }
+
+        /* Sidebar - Pass list */
+        .sidebar {
+            width: 280px;
+            background: #252526;
+            border-right: 1px solid #404040;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .sidebar-header {
+            padding: 12px 16px;
+            background: #2d2d2d;
+            border-bottom: 1px solid #404040;
+            font-size: 12px;
+            font-weight: 600;
+            text-transform: uppercase;
+            color: #808080;
+        }
+
+        .pass-list {
+            flex: 1;
+            overflow-y: auto;
+        }
+
+        .pass-item {
+            padding: 10px 16px;
+            cursor: pointer;
+            border-bottom: 1px solid #333;
+            transition: background 0.2s;
+        }
+
+        .pass-item:hover {
+            background: #2a2d2e;
+        }
+
+        .pass-item.active {
+            background: #094771;
+            border-left: 3px solid #569cd6;
+        }
+
+        .pass-item .index {
+            font-size: 10px;
+            color: #6a9955;
+            margin-right: 8px;
+        }
+
+        .pass-item .name {
+            font-size: 13px;
+            word-break: break-word;
+        }
+
+        .pass-item .badge {
+            font-size: 10px;
+            padding: 2px 6px;
+            border-radius: 3px;
+            margin-left: 8px;
+            text-transform: uppercase;
+        }
+
+        .pass-item .badge.initial {
+            background: #608b4e;
+            color: white;
+        }
+
+        .pass-item .badge.after {
+            background: #569cd6;
+            color: white;
+        }
+
+        .pass-item .badge.checkpoint {
+            background: #c586c0;
+            color: white;
+        }
+
+        /* Main content area */
+        .main-content {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+
+        /* Controls */
+        .controls {
+            padding: 12px 20px;
+            background: #2d2d2d;
+            border-bottom: 1px solid #404040;
+            display: flex;
+            align-items: center;
+            gap: 16px;
+            flex-wrap: wrap;
+        }
+
+        .nav-buttons {
+            display: flex;
+            gap: 8px;
+        }
+
+        .nav-btn {
+            padding: 6px 14px;
+            background: #0e639c;
+            border: none;
+            color: white;
+            cursor: pointer;
+            border-radius: 4px;
+            font-size: 13px;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .nav-btn:hover:not(:disabled) {
+            background: #1177bb;
+        }
+
+        .nav-btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        .slider-container {
+            flex: 1;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            min-width: 200px;
+        }
+
+        .slider {
+            flex: 1;
+            height: 6px;
+            -webkit-appearance: none;
+            background: #404040;
+            border-radius: 3px;
+            outline: none;
+        }
+
+        .slider::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            width: 16px;
+            height: 16px;
+            background: #569cd6;
+            border-radius: 50%;
+            cursor: pointer;
+        }
+
+        .slider-label {
+            font-size: 13px;
+            color: #9cdcfe;
+            min-width: 100px;
+        }
+
+        .view-toggle {
+            display: flex;
+            gap: 0;
+        }
+
+        .view-btn {
+            padding: 6px 12px;
+            background: #333;
+            border: none;
+            color: #ccc;
+            cursor: pointer;
+            font-size: 12px;
+            border: 1px solid #555;
+            margin-left: -1px;
+        }
+
+        .view-btn:first-child {
+            border-radius: 4px 0 0 4px;
+            margin-left: 0;
+        }
+
+        .view-btn:last-child {
+            border-radius: 0 4px 4px 0;
+        }
+
+        .view-btn.active {
+            background: #094771;
+            color: white;
+            border-color: #569cd6;
+            z-index: 1;
+            position: relative;
+        }
+
+        .view-btn:hover:not(.active) {
+            background: #404040;
+        }
+
+        /* IR Display */
+        .ir-container {
+            flex: 1;
+            display: flex;
+            overflow: hidden;
+        }
+
+        .ir-panel {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+
+        .ir-panel-header {
+            padding: 8px 16px;
+            background: #2d2d2d;
+            border-bottom: 1px solid #404040;
+            font-size: 12px;
+            color: #808080;
+        }
+
+        .ir-content {
+            flex: 1;
+            overflow: auto;
+            padding: 0;
+            font-family: 'JetBrains Mono', 'Fira Code', 'Consolas', monospace;
+            font-size: 13px;
+            line-height: 1.5;
+            background: #1e1e1e;
+        }
+
+        .ir-content.padded {
+            padding: 16px;
+            white-space: pre;
+        }
+
+        .diff-container {
+            flex: 1;
+            display: flex;
+            overflow: hidden;
+        }
+
+        .diff-panel {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+
+        .diff-panel:first-child {
+            border-right: 1px solid #404040;
+        }
+
+        .diff-panel-header {
+            padding: 8px 16px;
+            background: #2d2d2d;
+            border-bottom: 1px solid #404040;
+            font-size: 12px;
+        }
+
+        .diff-panel-header.before {
+            color: #ce9178;
+        }
+
+        .diff-panel-header.after {
+            color: #6a9955;
+        }
+
+        /* Syntax highlighting */
+        .keyword { color: #569cd6; }
+        .type { color: #4ec9b0; }
+        .string { color: #ce9178; }
+        .number { color: #b5cea8; }
+        .comment { color: #6a9955; font-style: italic; }
+        .attribute { color: #9cdcfe; }
+        .operator { color: #d4d4d4; }
+        .function { color: #dcdcaa; }
+        .dialect { color: #c586c0; }
+        .memref { color: #4fc1ff; }
+        .location { color: #808080; }
+
+        /* Diff line highlighting */
+        .diff-line {
+            display: block;
+            padding: 0 16px;
+            min-height: 1.5em;
+        }
+
+        .diff-line.added {
+            background: rgba(46, 160, 67, 0.25);
+        }
+
+        .diff-line.removed {
+            background: rgba(248, 81, 73, 0.25);
+        }
+
+        .diff-line.context {
+            background: transparent;
+        }
+
+        .diff-line .line-prefix {
+            display: inline-block;
+            width: 20px;
+            color: #808080;
+            user-select: none;
+        }
+
+        .diff-line.added .line-prefix {
+            color: #6a9955;
+        }
+
+        .diff-line.removed .line-prefix {
+            color: #ce9178;
+        }
+
+        .diff-line .line-number {
+            display: inline-block;
+            width: 50px;
+            color: #606060;
+            text-align: right;
+            padding-right: 10px;
+            user-select: none;
+        }
+
+        /* Unified diff specific */
+        .unified-diff .diff-line {
+            border-left: 3px solid transparent;
+        }
+
+        .unified-diff .diff-line.added {
+            border-left-color: #6a9955;
+        }
+
+        .unified-diff .diff-line.removed {
+            border-left-color: #ce9178;
+        }
+
+        /* Diff stats */
+        .diff-stats {
+            padding: 8px 16px;
+            background: #252526;
+            border-bottom: 1px solid #404040;
+            font-size: 12px;
+            color: #808080;
+        }
+
+        .diff-stats .added-count {
+            color: #6a9955;
+            margin-right: 12px;
+        }
+
+        .diff-stats .removed-count {
+            color: #ce9178;
+        }
+
+        /* Search */
+        .search-box {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .search-input {
+            padding: 6px 12px;
+            background: #3c3c3c;
+            border: 1px solid #555;
+            color: #ccc;
+            border-radius: 4px;
+            font-size: 13px;
+            width: 200px;
+        }
+
+        .search-input:focus {
+            outline: none;
+            border-color: #569cd6;
+        }
+
+        /* Loading */
+        .loading {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100%;
+            font-size: 16px;
+            color: #808080;
+        }
+
+        /* Keyboard shortcuts hint */
+        .shortcuts-hint {
+            font-size: 11px;
+            color: #606060;
+        }
+
+        .shortcuts-hint kbd {
+            background: #333;
+            padding: 2px 6px;
+            border-radius: 3px;
+            border: 1px solid #555;
+        }
+
+        /* Sync scroll indicator */
+        .sync-scroll-indicator {
+            font-size: 10px;
+            color: #6a9955;
+            margin-left: 8px;
+        }
+    </style>
+</head>
+<body>
+    <header>
+        <h1>MLIR <span>Browser</span></h1>
+        <div class="header-info">
+            <span id="snapshot-count">Loading...</span>
+            <span class="shortcuts-hint">
+                <kbd>←</kbd> <kbd>→</kbd> Navigate | <kbd>D</kbd> Toggle diff | <kbd>U</kbd> Unified
+            </span>
+        </div>
+    </header>
+
+    <div class="container">
+        <div class="sidebar">
+            <div class="sidebar-header">Pass Timeline</div>
+            <div class="pass-list" id="pass-list">
+                <div class="loading">Loading snapshots...</div>
+            </div>
+        </div>
+
+        <div class="main-content">
+            <div class="controls">
+                <div class="nav-buttons">
+                    <button class="nav-btn" id="btn-first" title="Go to first">⏮ First</button>
+                    <button class="nav-btn" id="btn-prev" title="Previous pass">◀ Prev</button>
+                    <button class="nav-btn" id="btn-next" title="Next pass">Next ▶</button>
+                    <button class="nav-btn" id="btn-last" title="Go to last">Last ⏭</button>
+                </div>
+
+                <div class="slider-container">
+                    <input type="range" class="slider" id="timeline-slider" min="0" max="0" value="0">
+                    <span class="slider-label" id="slider-label">0 / 0</span>
+                </div>
+
+                <div class="view-toggle">
+                    <button class="view-btn active" id="btn-single" title="Single IR view">Single</button>
+                    <button class="view-btn" id="btn-split-diff" title="Split view with diff highlighting">Split+Diff</button>
+                    <button class="view-btn" id="btn-unified" title="Unified diff (git-style)">Unified</button>
+                </div>
+
+                <div class="search-box">
+                    <input type="text" class="search-input" id="search-input" placeholder="Search in IR...">
+                </div>
+            </div>
+
+            <div class="ir-container" id="ir-container">
+                <!-- Single view -->
+                <div class="ir-panel" id="single-view">
+                    <div class="ir-panel-header" id="current-pass-name">Select a pass to view IR</div>
+                    <div class="ir-content padded" id="ir-display"></div>
+                </div>
+
+                <!-- Split+Diff view (hidden by default) -->
+                <div class="diff-container" id="split-diff-view" style="display: none;">
+                    <div class="diff-panel">
+                        <div class="diff-panel-header before" id="split-diff-before-header">Before</div>
+                        <div class="ir-content" id="split-diff-before"></div>
+                    </div>
+                    <div class="diff-panel">
+                        <div class="diff-panel-header after" id="split-diff-after-header">After</div>
+                        <div class="ir-content" id="split-diff-after"></div>
+                    </div>
+                </div>
+
+                <!-- Unified diff view (hidden by default) -->
+                <div class="ir-panel" id="unified-view" style="display: none;">
+                    <div class="ir-panel-header" id="unified-header">Unified Diff</div>
+                    <div class="diff-stats" id="diff-stats"></div>
+                    <div class="ir-content unified-diff" id="unified-diff"></div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // State
+        let snapshots = [];
+        let currentIndex = 0;
+        let viewMode = 'single'; // 'single', 'split-diff', or 'unified'
+
+        // Elements
+        const passList = document.getElementById('pass-list');
+        const irDisplay = document.getElementById('ir-display');
+        const slider = document.getElementById('timeline-slider');
+        const sliderLabel = document.getElementById('slider-label');
+        const currentPassName = document.getElementById('current-pass-name');
+        const snapshotCount = document.getElementById('snapshot-count');
+        const searchInput = document.getElementById('search-input');
+
+        // Navigation buttons
+        const btnFirst = document.getElementById('btn-first');
+        const btnPrev = document.getElementById('btn-prev');
+        const btnNext = document.getElementById('btn-next');
+        const btnLast = document.getElementById('btn-last');
+        const btnSingle = document.getElementById('btn-single');
+        const btnSplitDiff = document.getElementById('btn-split-diff');
+        const btnUnified = document.getElementById('btn-unified');
+
+        // Views
+        const singleView = document.getElementById('single-view');
+        const splitDiffView = document.getElementById('split-diff-view');
+        const unifiedView = document.getElementById('unified-view');
+        
+        // Split diff elements
+        const splitDiffBefore = document.getElementById('split-diff-before');
+        const splitDiffAfter = document.getElementById('split-diff-after');
+        const splitDiffBeforeHeader = document.getElementById('split-diff-before-header');
+        const splitDiffAfterHeader = document.getElementById('split-diff-after-header');
+        
+        // Unified diff elements
+        const unifiedDiff = document.getElementById('unified-diff');
+        const unifiedHeader = document.getElementById('unified-header');
+        const diffStats = document.getElementById('diff-stats');
+
+        // ===== DIFF ALGORITHM =====
+        // LCS-based diff algorithm to find differences between two texts
+        
+        function computeDiff(oldText, newText) {
+            const oldLines = oldText.split('\n');
+            const newLines = newText.split('\n');
+            
+            // Compute LCS (Longest Common Subsequence)
+            const lcs = computeLCS(oldLines, newLines);
+            
+            // Generate diff from LCS
+            return generateDiffFromLCS(oldLines, newLines, lcs);
+        }
+        
+        function computeLCS(oldLines, newLines) {
+            const m = oldLines.length;
+            const n = newLines.length;
+            
+            // Create DP table
+            const dp = Array(m + 1).fill(null).map(() => Array(n + 1).fill(0));
+            
+            // Fill DP table
+            for (let i = 1; i <= m; i++) {
+                for (let j = 1; j <= n; j++) {
+                    if (oldLines[i - 1] === newLines[j - 1]) {
+                        dp[i][j] = dp[i - 1][j - 1] + 1;
+                    } else {
+                        dp[i][j] = Math.max(dp[i - 1][j], dp[i][j - 1]);
+                    }
+                }
+            }
+            
+            // Backtrack to find LCS
+            const lcs = [];
+            let i = m, j = n;
+            while (i > 0 && j > 0) {
+                if (oldLines[i - 1] === newLines[j - 1]) {
+                    lcs.unshift({ oldIndex: i - 1, newIndex: j - 1, line: oldLines[i - 1] });
+                    i--;
+                    j--;
+                } else if (dp[i - 1][j] > dp[i][j - 1]) {
+                    i--;
+                } else {
+                    j--;
+                }
+            }
+            
+            return lcs;
+        }
+        
+        function generateDiffFromLCS(oldLines, newLines, lcs) {
+            const diff = [];
+            let oldIdx = 0;
+            let newIdx = 0;
+            let lcsIdx = 0;
+            
+            while (oldIdx < oldLines.length || newIdx < newLines.length) {
+                if (lcsIdx < lcs.length) {
+                    const lcsItem = lcs[lcsIdx];
+                    
+                    // Add removed lines (in old but not in LCS)
+                    while (oldIdx < lcsItem.oldIndex) {
+                        diff.push({ type: 'removed', line: oldLines[oldIdx], oldLineNum: oldIdx + 1 });
+                        oldIdx++;
+                    }
+                    
+                    // Add added lines (in new but not in LCS)
+                    while (newIdx < lcsItem.newIndex) {
+                        diff.push({ type: 'added', line: newLines[newIdx], newLineNum: newIdx + 1 });
+                        newIdx++;
+                    }
+                    
+                    // Add context line (in both)
+                    diff.push({ 
+                        type: 'context', 
+                        line: lcsItem.line, 
+                        oldLineNum: oldIdx + 1, 
+                        newLineNum: newIdx + 1 
+                    });
+                    oldIdx++;
+                    newIdx++;
+                    lcsIdx++;
+                } else {
+                    // Add remaining removed lines
+                    while (oldIdx < oldLines.length) {
+                        diff.push({ type: 'removed', line: oldLines[oldIdx], oldLineNum: oldIdx + 1 });
+                        oldIdx++;
+                    }
+                    
+                    // Add remaining added lines
+                    while (newIdx < newLines.length) {
+                        diff.push({ type: 'added', line: newLines[newIdx], newLineNum: newIdx + 1 });
+                        newIdx++;
+                    }
+                }
+            }
+            
+            return diff;
+        }
+        
+        // ===== END DIFF ALGORITHM =====
+
+        // Load snapshots
+        async function loadSnapshots() {
+            try {
+                if (window.embeddedSnapshots) {
+                    snapshots = window.embeddedSnapshots.snapshots;
+                } else {
+                    const response = await fetch('ir_snapshots.json');
+                    const data = await response.json();
+                    snapshots = data.snapshots;
+                }
+                
+                snapshotCount.textContent = `${snapshots.length} snapshots`;
+                slider.max = snapshots.length - 1;
+                
+                renderPassList();
+                if (snapshots.length > 0) {
+                    selectSnapshot(0);
+                }
+            } catch (error) {
+                passList.innerHTML = `<div class="loading">Error loading snapshots: ${error.message}</div>`;
+            }
+        }
+
+        // Render pass list in sidebar
+        function renderPassList() {
+            passList.innerHTML = '';
+            snapshots.forEach((snapshot, index) => {
+                const item = document.createElement('div');
+                item.className = 'pass-item' + (index === currentIndex ? ' active' : '');
+                item.innerHTML = `
+                    <span class="index">#${index}</span>
+                    <span class="name">${escapeHtml(snapshot.pass_name)}</span>
+                    <span class="badge ${snapshot.before_after}">${snapshot.before_after}</span>
+                `;
+                item.onclick = () => selectSnapshot(index);
+                passList.appendChild(item);
+            });
+        }
+
+        // Select and display a snapshot
+        function selectSnapshot(index) {
+            if (index < 0 || index >= snapshots.length) return;
+            
+            currentIndex = index;
+            slider.value = index;
+            sliderLabel.textContent = `${index + 1} / ${snapshots.length}`;
+            
+            // Update pass list highlighting
+            document.querySelectorAll('.pass-item').forEach((item, i) => {
+                item.classList.toggle('active', i === index);
+            });
+            
+            // Scroll to active item
+            const activeItem = document.querySelector('.pass-item.active');
+            if (activeItem) {
+                activeItem.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+            }
+            
+            // Update display based on view mode
+            updateDisplay();
+            
+            // Update button states
+            btnFirst.disabled = index === 0;
+            btnPrev.disabled = index === 0;
+            btnNext.disabled = index === snapshots.length - 1;
+            btnLast.disabled = index === snapshots.length - 1;
+        }
+        
+        function updateDisplay() {
+            const snapshot = snapshots[currentIndex];
+            currentPassName.textContent = snapshot.pass_name;
+            
+            if (viewMode === 'single') {
+                irDisplay.innerHTML = highlightSyntax(snapshot.ir_content);
+            } else if (viewMode === 'split-diff') {
+                updateSplitDiffView();
+            } else if (viewMode === 'unified') {
+                updateUnifiedDiffView();
+            }
+        }
+
+        // MLIR Syntax highlighting
+        function highlightSyntax(code) {
+            if (!code) return '';
+            
+            // Escape HTML first
+            let html = escapeHtml(code);
+            
+            // Apply highlighting patterns (order matters!)
+            const patterns = [
+                // Comments
+                [/(\/\/[^\n]*)/g, '<span class="comment">$1</span>'],
+                // Locations
+                [/(loc\([^)]+\))/g, '<span class="location">$1</span>'],
+                // Strings
+                [/("(?:[^"\\]|\\.)*")/g, '<span class="string">$1</span>'],
+                // Dialect prefixes
+                [/\b(air|aie|aiex|linalg|memref|arith|scf|affine|tensor|bufferization|func|vector|transform)\./g, 
+                 '<span class="dialect">$1</span>.'],
+                // Types
+                [/\b(memref|tensor|vector|index|i\d+|f\d+|bf16)(&lt;[^&]*&gt;)?/g, 
+                 '<span class="type">$1$2</span>'],
+                // Keywords
+                [/\b(module|func\.func|return|scf\.for|scf\.if|scf\.yield|affine\.for|affine\.if)\b/g, 
+                 '<span class="keyword">$1</span>'],
+                // Function names
+                [/@([a-zA-Z_][a-zA-Z0-9_]*)/g, '@<span class="function">$1</span>'],
+                // Attributes
+                [/(#[a-zA-Z_][a-zA-Z0-9_]*)/g, '<span class="attribute">$1</span>'],
+                // Numbers
+                [/\b(\d+(?:\.\d+)?)\b/g, '<span class="number">$1</span>'],
+                // SSA values
+                [/(%[a-zA-Z0-9_]+)/g, '<span class="attribute">$1</span>'],
+            ];
+            
+            for (const [pattern, replacement] of patterns) {
+                html = html.replace(pattern, replacement);
+            }
+            
+            return html;
+        }
+
+        // Update split diff view with line-by-line highlighting
+        function updateSplitDiffView() {
+            if (currentIndex === 0) {
+                splitDiffBeforeHeader.textContent = 'No previous snapshot';
+                splitDiffBefore.innerHTML = '<div class="diff-line context"><span class="comment">// This is the initial IR</span></div>';
+                splitDiffAfter.innerHTML = renderLinesWithHighlight(snapshots[0].ir_content, 'context');
+                splitDiffAfterHeader.textContent = `Current: ${snapshots[0].pass_name}`;
+                return;
+            }
+            
+            const prevSnapshot = snapshots[currentIndex - 1];
+            const currentSnapshot = snapshots[currentIndex];
+            
+            splitDiffBeforeHeader.textContent = `Before: ${prevSnapshot.pass_name}`;
+            splitDiffAfterHeader.textContent = `After: ${currentSnapshot.pass_name}`;
+            
+            // Compute diff
+            const diff = computeDiff(prevSnapshot.ir_content || '', currentSnapshot.ir_content || '');
+            
+            // Render split view
+            let beforeHtml = '';
+            let afterHtml = '';
+            
+            for (const item of diff) {
+                const lineContent = highlightSyntax(item.line);
+                
+                if (item.type === 'removed') {
+                    beforeHtml += `<div class="diff-line removed"><span class="line-prefix">-</span><span class="line-number">${item.oldLineNum}</span>${lineContent}</div>`;
+                    // Add empty placeholder in after panel for alignment
+                    afterHtml += `<div class="diff-line" style="visibility: hidden;"><span class="line-prefix"> </span><span class="line-number"></span>${lineContent}</div>`;
+                } else if (item.type === 'added') {
+                    // Add empty placeholder in before panel for alignment
+                    beforeHtml += `<div class="diff-line" style="visibility: hidden;"><span class="line-prefix"> </span><span class="line-number"></span>${lineContent}</div>`;
+                    afterHtml += `<div class="diff-line added"><span class="line-prefix">+</span><span class="line-number">${item.newLineNum}</span>${lineContent}</div>`;
+                } else {
+                    beforeHtml += `<div class="diff-line context"><span class="line-prefix"> </span><span class="line-number">${item.oldLineNum}</span>${lineContent}</div>`;
+                    afterHtml += `<div class="diff-line context"><span class="line-prefix"> </span><span class="line-number">${item.newLineNum}</span>${lineContent}</div>`;
+                }
+            }
+            
+            splitDiffBefore.innerHTML = beforeHtml;
+            splitDiffAfter.innerHTML = afterHtml;
+            
+            // Sync scrolling
+            setupSyncScroll(splitDiffBefore, splitDiffAfter);
+        }
+        
+        // Setup synchronized scrolling between two elements
+        function setupSyncScroll(el1, el2) {
+            let isSyncing = false;
+            
+            el1.onscroll = () => {
+                if (isSyncing) return;
+                isSyncing = true;
+                el2.scrollTop = el1.scrollTop;
+                el2.scrollLeft = el1.scrollLeft;
+                isSyncing = false;
+            };
+            
+            el2.onscroll = () => {
+                if (isSyncing) return;
+                isSyncing = true;
+                el1.scrollTop = el2.scrollTop;
+                el1.scrollLeft = el2.scrollLeft;
+                isSyncing = false;
+            };
+        }
+
+        // Render lines with highlight type
+        function renderLinesWithHighlight(content, type) {
+            if (!content) return '';
+            const lines = content.split('\n');
+            return lines.map((line, i) => {
+                const lineContent = highlightSyntax(line);
+                const prefix = type === 'added' ? '+' : type === 'removed' ? '-' : ' ';
+                return `<div class="diff-line ${type}"><span class="line-prefix">${prefix}</span><span class="line-number">${i + 1}</span>${lineContent}</div>`;
+            }).join('');
+        }
+
+        // Update unified diff view (git-style)
+        function updateUnifiedDiffView() {
+            if (currentIndex === 0) {
+                unifiedHeader.textContent = `Initial IR: ${snapshots[0].pass_name}`;
+                diffStats.innerHTML = '<span class="added-count">Initial snapshot - all lines are new</span>';
+                unifiedDiff.innerHTML = renderLinesWithHighlight(snapshots[0].ir_content, 'added');
+                return;
+            }
+            
+            const prevSnapshot = snapshots[currentIndex - 1];
+            const currentSnapshot = snapshots[currentIndex];
+            
+            unifiedHeader.textContent = `Diff: ${prevSnapshot.pass_name} → ${currentSnapshot.pass_name}`;
+            
+            // Compute diff
+            const diff = computeDiff(prevSnapshot.ir_content || '', currentSnapshot.ir_content || '');
+            
+            // Count stats
+            let addedCount = 0;
+            let removedCount = 0;
+            for (const item of diff) {
+                if (item.type === 'added') addedCount++;
+                else if (item.type === 'removed') removedCount++;
+            }
+            
+            diffStats.innerHTML = `<span class="added-count">+${addedCount} added</span><span class="removed-count">-${removedCount} removed</span>`;
+            
+            // Render unified diff
+            let html = '';
+            for (const item of diff) {
+                const lineContent = highlightSyntax(item.line);
+                const prefix = item.type === 'added' ? '+' : item.type === 'removed' ? '-' : ' ';
+                const lineNum = item.type === 'added' ? item.newLineNum : item.type === 'removed' ? item.oldLineNum : item.newLineNum;
+                html += `<div class="diff-line ${item.type}"><span class="line-prefix">${prefix}</span><span class="line-number">${lineNum}</span>${lineContent}</div>`;
+            }
+            
+            unifiedDiff.innerHTML = html;
+        }
+
+        // Toggle view mode
+        function setViewMode(mode) {
+            viewMode = mode;
+            
+            // Update button states
+            btnSingle.classList.toggle('active', mode === 'single');
+            btnSplitDiff.classList.toggle('active', mode === 'split-diff');
+            btnUnified.classList.toggle('active', mode === 'unified');
+            
+            // Show/hide views
+            singleView.style.display = mode === 'single' ? 'flex' : 'none';
+            splitDiffView.style.display = mode === 'split-diff' ? 'flex' : 'none';
+            unifiedView.style.display = mode === 'unified' ? 'flex' : 'none';
+            
+            // Update content
+            updateDisplay();
+        }
+
+        // Search functionality
+        function performSearch(query) {
+            if (!query) {
+                updateDisplay(); // Reset highlighting
+                return;
+            }
+            
+            // Only search in single view for now
+            if (viewMode === 'single') {
+                const content = irDisplay.innerHTML;
+                const regex = new RegExp(`(${escapeRegex(query)})`, 'gi');
+                irDisplay.innerHTML = content.replace(regex, '<mark>$1</mark>');
+            }
+        }
+
+        // Utility functions
+        function escapeHtml(text) {
+            if (!text) return '';
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        function escapeRegex(string) {
+            return string.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        }
+
+        // Event listeners
+        btnFirst.onclick = () => selectSnapshot(0);
+        btnPrev.onclick = () => selectSnapshot(currentIndex - 1);
+        btnNext.onclick = () => selectSnapshot(currentIndex + 1);
+        btnLast.onclick = () => selectSnapshot(snapshots.length - 1);
+
+        slider.oninput = (e) => selectSnapshot(parseInt(e.target.value));
+
+        btnSingle.onclick = () => setViewMode('single');
+        btnSplitDiff.onclick = () => setViewMode('split-diff');
+        btnUnified.onclick = () => setViewMode('unified');
+
+        searchInput.oninput = (e) => performSearch(e.target.value);
+
+        // Keyboard shortcuts
+        document.addEventListener('keydown', (e) => {
+            if (e.target.tagName === 'INPUT') return;
+            
+            switch (e.key) {
+                case 'ArrowLeft':
+                    selectSnapshot(currentIndex - 1);
+                    e.preventDefault();
+                    break;
+                case 'ArrowRight':
+                    selectSnapshot(currentIndex + 1);
+                    e.preventDefault();
+                    break;
+                case 'd':
+                case 'D':
+                    // Cycle through: single -> split-diff -> unified -> single
+                    if (viewMode === 'single') setViewMode('split-diff');
+                    else if (viewMode === 'split-diff') setViewMode('unified');
+                    else setViewMode('single');
+                    break;
+                case 'u':
+                case 'U':
+                    setViewMode('unified');
+                    break;
+                case 's':
+                case 'S':
+                    setViewMode('single');
+                    break;
+                case 'Home':
+                    selectSnapshot(0);
+                    e.preventDefault();
+                    break;
+                case 'End':
+                    selectSnapshot(snapshots.length - 1);
+                    e.preventDefault();
+                    break;
+            }
+        });
+
+        // Initialize
+        loadSnapshots();
+    </script>
+</body>
+</html>
