@@ -46,33 +46,29 @@ transform.print %arg1 {name = "=== After step X ==="} : !pdl.operation
 ## Recent Changes
 
 - Created comprehensive transform pipeline analysis (`memory_bank/42_triton_softmax/transform_pipeline_analysis.md`)
-- Created reduction hoisting design proposal (`memory_bank/42_triton_softmax/reduction_hoisting_design.md`)
 - Identified that `split_reduction` cannot be used (creates 2D vectors, AIE only supports 1D)
 - Found the critical step where reductions enter loops: step [45] `tile_using_for [0, 32]`
 
 ## Active Decisions
 
-**Reduction Hoisting Strategy:**
-- Need a new custom transform `air.hoist_vector_reduction`
-- Pattern: Convert scalar accumulator inside loop → vector iter_arg with element-wise ops
-- Move final `vector.reduction` outside the loop
-- Maintain 1D vectors throughout (AIE constraint)
+**Optimization Goal:** Move `vector.reduction` operations outside of `scf.for` loops for better performance.
+
+**Current Approach:** Explore existing dialect operations and transform patterns before implementing custom transforms.
+
+**Key Constraint:** AIE only supports 1D vectors (`vector<32xbf16>`), NOT 2D vectors.
 
 ## Current Blockers
 
-1. **No existing transform for reduction hoisting** - Need to implement custom transform
-2. **AIE 1D vector constraint** - Standard `split_reduction` creates 2D vectors
-3. **Implementation required** - Design complete, C++ implementation pending
+1. **AIE 1D vector constraint** - Standard `split_reduction` creates 2D vectors which AIE rejects
+2. **Reductions inside loops** - Step [45] `tile_using_for [0, 32]` places reductions in loop body
 
 ## Next Steps
 
-1. ✅ Understand transform pipeline step-by-step (DONE)
-2. ✅ Identify intervention point (DONE - step [45] or post-vectorization)  
-3. ✅ Design `air.hoist_vector_reduction` transform (DONE - see design doc)
-4. ⬜ Implement transform in `AIRLinalgCodegen.cpp`
-5. ⬜ Add transform op definition to `AIRTransformOps.td`
-6. ⬜ Test with softmax example
-7. ⬜ Verify correctness and measure performance improvement
+1. ✅ Understand transform pipeline step-by-step (DONE - see `transform_pipeline_analysis.md`)
+2. ✅ Identify intervention point (DONE - step [45] or post-vectorization)
+3. ⬜ Explore existing dialect ops to achieve reduction hoisting
+4. ⬜ Test modifications with softmax example
+5. ⬜ Verify correctness and measure performance improvement
 
 ## Quick Links
 
