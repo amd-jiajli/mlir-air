@@ -40,6 +40,9 @@ endif
 # Debug IR output path (used with debug_ir target)
 DEBUG_IR_PATH ?= ir_debug/final.mlir
 
+# Pre-transformed IR file (optional, bypasses transform script)
+PRE_TRANSFORMED_IR ?=
+
 # AIE target architecture and transform script selection
 # NPU1 (aie2) requires extern_func.cc compilation for getExpBf16
 # NPU2 (aie2p) uses native intrinsics, no external kernel needed
@@ -76,7 +79,8 @@ else
   powershell :=
 endif
 
-.PHONY: all run compile-kernel compile-xclbin profile build-test-exe debug_ir debug_aircc clean help
+.PHONY: all run compile-kernel compile-xclbin profile build-test-exe debug_ir debug_aircc clean help \
+        compile-xclbin-pretransformed profile-pretransformed profile-baseline profile-optimized run-pretransformed
 
 all: run
 
@@ -95,6 +99,11 @@ help:
 	@echo "  build-test-exe - Build the C++ test executable only"
 	@echo "  debug_ir       - Dump transformed IR to file and exit"
 	@echo "  debug_aircc    - Compile with per-pass IR output (fine-grained debugging)"
+	@echo "  compile-xclbin-pretransformed - Compile xclbin using pre-transformed IR"
+	@echo "  profile-pretransformed - Profile using pre-transformed IR"
+	@echo "  profile-baseline   - Profile baseline_transformed.mlir (current pipeline)"
+	@echo "  profile-optimized  - Profile optimized_transformed.mlir (vector accumulation)"
+	@echo "  run-pretransformed - Run validation using pre-transformed IR"
 	@echo "  clean          - Remove build artifacts"
 	@echo "  help           - Show this message"
 	@echo ""
@@ -107,6 +116,7 @@ help:
 	@echo "  DEBUG_AIRCC    - Enable per-pass IR output for fine-grained debugging (1 = enabled, default: 0)"
 	@echo "  DEBUG_IR_PATH  - Path for debug IR output (default: ir_debug/final.mlir)"
 	@echo "  TRANSFORM_SCRIPT - Override transform script path (default: based on TARGET)"
+	@echo "  PRE_TRANSFORMED_IR - Pre-transformed IR file (bypasses transform script)"
 	@echo "  PEANO_INSTALL_DIR - Path to Peano compiler (auto-detected if in PATH)"
 	@echo ""
 	@echo "Transform scripts:"
@@ -123,6 +133,12 @@ help:
 	@echo "  make compile-kernel                 # Just compile the kernel"
 	@echo "  make INPUT_MLIR=4x256.mlir          # Use custom input MLIR file"
 	@echo "  make TRANSFORM_SCRIPT=my_transform.mlir  # Use custom transform script"
+	@echo ""
+	@echo "Pre-transformed IR examples (for reduction optimization testing):"
+	@echo "  make profile-baseline                    # Profile baseline (scalar reduction in loop)"
+	@echo "  make profile-optimized                   # Profile optimized (vector accumulation)"
+	@echo "  make profile-pretransformed PRE_TRANSFORMED_IR=my_ir.mlir"
+	@echo "  make run-pretransformed PRE_TRANSFORMED_IR=optimized_transformed.mlir"
 
 compile-kernel:
 	@mkdir -p $(BUILD_DIR)
@@ -266,6 +282,97 @@ endif
 	@echo ""
 	@echo "Debug IR files saved to: $(BUILD_DIR)/air_project/debug_ir/"
 	@echo "Pass log saved to: $(BUILD_DIR)/air_project/pass.log"
+
+# ============================================================
+# Pre-transformed IR targets (for reduction optimization testing)
+# ============================================================
+
+# Compile xclbin using pre-transformed IR (bypasses transform script)
+compile-xclbin-pretransformed:
+	@if [ -z "$(PRE_TRANSFORMED_IR)" ]; then \
+		echo "Error: PRE_TRANSFORMED_IR must be specified"; \
+		echo "Usage: make compile-xclbin-pretransformed PRE_TRANSFORMED_IR=baseline_transformed.mlir"; \
+		exit 1; \
+	fi
+	@mkdir -p $(BUILD_DIR)
+	@echo "Using pre-transformed IR: $(PRE_TRANSFORMED_IR)"
+	@cd $(BUILD_DIR) && PEANO_INSTALL_DIR=$(PEANO_INSTALL_DIR) \
+		$(powershell) python3 $(srcdir)/run.py \
+			--pre-transformed-ir $(srcdir)/$(PRE_TRANSFORMED_IR) \
+			--M $(M) \
+			--N $(N) \
+			--compile-only \
+			$(VERBOSE_FLAG) \
+			$(DEBUG_AIRCC_FLAG)
+
+# Run validation using pre-transformed IR
+run-pretransformed:
+	@if [ -z "$(PRE_TRANSFORMED_IR)" ]; then \
+		echo "Error: PRE_TRANSFORMED_IR must be specified"; \
+		echo "Usage: make run-pretransformed PRE_TRANSFORMED_IR=optimized_transformed.mlir"; \
+		exit 1; \
+	fi
+	@mkdir -p $(BUILD_DIR)
+	@echo "Running validation with pre-transformed IR: $(PRE_TRANSFORMED_IR)"
+	@cd $(BUILD_DIR) && PEANO_INSTALL_DIR=$(PEANO_INSTALL_DIR) \
+		$(powershell) python3 $(srcdir)/run.py \
+			--pre-transformed-ir $(srcdir)/$(PRE_TRANSFORMED_IR) \
+			--M $(M) \
+			--N $(N) \
+			$(VERBOSE_FLAG) \
+			$(DEBUG_AIRCC_FLAG)
+
+# Profile using pre-transformed IR
+profile-pretransformed: build-test-exe
+	@if [ -z "$(PRE_TRANSFORMED_IR)" ]; then \
+		echo "Error: PRE_TRANSFORMED_IR must be specified"; \
+		echo "Usage: make profile-pretransformed PRE_TRANSFORMED_IR=optimized_transformed.mlir"; \
+		exit 1; \
+	fi
+	@mkdir -p $(BUILD_DIR)
+	@echo "Compiling pre-transformed IR: $(PRE_TRANSFORMED_IR)"
+	@cd $(BUILD_DIR) && PEANO_INSTALL_DIR=$(PEANO_INSTALL_DIR) \
+		$(powershell) python3 $(srcdir)/run.py \
+			--pre-transformed-ir $(srcdir)/$(PRE_TRANSFORMED_IR) \
+			--M $(M) \
+			--N $(N) \
+			--compile-only \
+			$(VERBOSE_FLAG)
+	@echo ""
+	@echo "Running profiling..."
+	cd $(BUILD_DIR) && ./test.exe -x air.xclbin -k MLIR_AIE -i air.insts.bin -M $(M) -N $(N) -v $(VERBOSE)
+
+# Convenience target: profile baseline (current pipeline output with scalar reduction)
+profile-baseline: build-test-exe
+	@mkdir -p $(BUILD_DIR)
+	@echo "Profiling BASELINE (scalar reduction inside loop)..."
+	@echo "Using: baseline_transformed.mlir"
+	@cd $(BUILD_DIR) && PEANO_INSTALL_DIR=$(PEANO_INSTALL_DIR) \
+		$(powershell) python3 $(srcdir)/run.py \
+			--pre-transformed-ir $(srcdir)/baseline_transformed.mlir \
+			--M $(M) \
+			--N $(N) \
+			--compile-only \
+			$(VERBOSE_FLAG)
+	@echo ""
+	@echo "Running profiling..."
+	cd $(BUILD_DIR) && ./test.exe -x air.xclbin -k MLIR_AIE -i air.insts.bin -M $(M) -N $(N) -v $(VERBOSE)
+
+# Convenience target: profile optimized (vector accumulation pattern)
+profile-optimized: build-test-exe
+	@mkdir -p $(BUILD_DIR)
+	@echo "Profiling OPTIMIZED (vector accumulation, single post-loop reduction)..."
+	@echo "Using: optimized_transformed.mlir"
+	@cd $(BUILD_DIR) && PEANO_INSTALL_DIR=$(PEANO_INSTALL_DIR) \
+		$(powershell) python3 $(srcdir)/run.py \
+			--pre-transformed-ir $(srcdir)/optimized_transformed.mlir \
+			--M $(M) \
+			--N $(N) \
+			--compile-only \
+			$(VERBOSE_FLAG)
+	@echo ""
+	@echo "Running profiling..."
+	cd $(BUILD_DIR) && ./test.exe -x air.xclbin -k MLIR_AIE -i air.insts.bin -M $(M) -N $(N) -v $(VERBOSE)
 
 clean:
 	rm -rf build_* __pycache__
