@@ -76,6 +76,14 @@ parser.add_argument(
     help="Enable debug mode in aircc to emit IR after each individual pass for fine-grained inspection",
 )
 parser.add_argument(
+    "--pre-transformed-ir",
+    type=str,
+    dest="pre_transformed_ir",
+    default=None,
+    metavar="MLIR_FILE",
+    help="Load pre-transformed IR directly, skipping the transform script (for testing optimized IR)",
+)
+parser.add_argument(
     "--output-format",
     type=str,
     dest="output_format",
@@ -95,82 +103,122 @@ def softmax(x, axis=-1):
 
 with air.ir.Context() as ctx, Location.unknown():
 
-    ################################################
-    ## Input SCF and Linalg IR
-    ################################################
-
-    # Resolve input MLIR path - if not absolute and not found, try script directory
-    input_mlir_path = args.input_mlir
-    if not os.path.isabs(input_mlir_path) and not os.path.exists(input_mlir_path):
-        input_mlir_path = os.path.join(script_dir, input_mlir_path)
-
-    # Load the input MLIR from file
-    print(f"Loading input MLIR from: {input_mlir_path}")
-    with open(input_mlir_path, "r") as f:
-        air_tiled_ir_string = f.read()
-    air_module = Module.parse(air_tiled_ir_string)
-
-    ################################################
-    ## Tiling
-    ################################################
-
-    pipeline = (
-        "builtin.module("
-        + ",".join(
-            [
-                "air-resolve-tensor-opoperand-conflicts",
-                "air-override-memref-memory-space{scope=func memory-space=1}",
-            ]
-        )
-        + ")"
-    )
-    pm = air.passmanager.PassManager.parse(pipeline)
-    pm.run(air_module.operation)
-
-    ################################################
-    ## Tiling
-    ################################################
-
-    # Load the MLIR transform IR from an external file
-    with open(args.transform_script, "r") as f:
-        transform_ir_string = f.read()
-    transform_ir = Module.parse(transform_ir_string)
-    run_transform(transform_ir, air_module)
-
-    # Print the IR for debugging and exit if --debug-ir is specified
-    if args.debug_ir:
-        import os
-
-        output_file = args.debug_ir
-        os.makedirs(os.path.dirname(output_file) or ".", exist_ok=True)
-        with open(output_file, "w") as f:
-            f.write(str(air_module))
-        print(f"Transformed IR written to {output_file}")
-        exit(0)
-
-    ###############################################
-    # Binding scf.paralell to air hierarchies
-    ###############################################
+    # Get M, N dimensions (used for validation)
     M, N = args.M, args.N
-    input_size = (M, N)
-    tile_size = (4, N)  # herd size = 4 (4 AIE cores)
-    launch_size = tuple(i // t for i, t in zip(input_size, tile_size))
 
-    pipeline = (
-        "builtin.module("
-        + ",".join(
-            [
-                f"func.func(air-wrap-func-with-parallel{{loop-bounds={launch_size[0]},{launch_size[1]},1}})",
-                "air-par-to-launch{depth=-1 has-air-segment=true}",
-                "air-copy-to-dma",
-                "canonicalize",
-                "cse",
-            ]
+    # Check if using pre-transformed IR (skip initial transform steps)
+    if args.pre_transformed_ir:
+        ################################################
+        ## Load Pre-Transformed IR Directly
+        ################################################
+        pre_transformed_path = args.pre_transformed_ir
+        if not os.path.isabs(pre_transformed_path) and not os.path.exists(pre_transformed_path):
+            pre_transformed_path = os.path.join(script_dir, pre_transformed_path)
+        
+        print(f"Loading pre-transformed IR from: {pre_transformed_path}")
+        with open(pre_transformed_path, "r") as f:
+            pre_transformed_ir_string = f.read()
+        air_module = Module.parse(pre_transformed_ir_string)
+        print("Skipping transform script - using pre-transformed IR")
+        
+        ###############################################
+        # Binding scf.paralell to air hierarchies
+        ###############################################
+        input_size = (M, N)
+        tile_size = (4, N)  # herd size = 4 (4 AIE cores)
+        launch_size = tuple(i // t for i, t in zip(input_size, tile_size))
+
+        pipeline = (
+            "builtin.module("
+            + ",".join(
+                [
+                    f"func.func(air-wrap-func-with-parallel{{loop-bounds={launch_size[0]},{launch_size[1]},1}})",
+                    "air-par-to-launch{depth=-1 has-air-segment=true}",
+                    "air-copy-to-dma",
+                    "canonicalize",
+                    "cse",
+                ]
+            )
+            + ")"
         )
-        + ")"
-    )
-    pm = air.passmanager.PassManager.parse(pipeline)
-    pm.run(air_module.operation)
+        pm = air.passmanager.PassManager.parse(pipeline)
+        pm.run(air_module.operation)
+    else:
+        ################################################
+        ## Input SCF and Linalg IR
+        ################################################
+
+        # Resolve input MLIR path - if not absolute and not found, try script directory
+        input_mlir_path = args.input_mlir
+        if not os.path.isabs(input_mlir_path) and not os.path.exists(input_mlir_path):
+            input_mlir_path = os.path.join(script_dir, input_mlir_path)
+
+        # Load the input MLIR from file
+        print(f"Loading input MLIR from: {input_mlir_path}")
+        with open(input_mlir_path, "r") as f:
+            air_tiled_ir_string = f.read()
+        air_module = Module.parse(air_tiled_ir_string)
+
+        ################################################
+        ## Tiling
+        ################################################
+
+        pipeline = (
+            "builtin.module("
+            + ",".join(
+                [
+                    "air-resolve-tensor-opoperand-conflicts",
+                    "air-override-memref-memory-space{scope=func memory-space=1}",
+                ]
+            )
+            + ")"
+        )
+        pm = air.passmanager.PassManager.parse(pipeline)
+        pm.run(air_module.operation)
+
+        ################################################
+        ## Tiling
+        ################################################
+
+        # Load the MLIR transform IR from an external file
+        with open(args.transform_script, "r") as f:
+            transform_ir_string = f.read()
+        transform_ir = Module.parse(transform_ir_string)
+        run_transform(transform_ir, air_module)
+
+        # Print the IR for debugging and exit if --debug-ir is specified
+        if args.debug_ir:
+            import os
+
+            output_file = args.debug_ir
+            os.makedirs(os.path.dirname(output_file) or ".", exist_ok=True)
+            with open(output_file, "w") as f:
+                f.write(str(air_module))
+            print(f"Transformed IR written to {output_file}")
+            exit(0)
+
+        ###############################################
+        # Binding scf.paralell to air hierarchies
+        ###############################################
+        input_size = (M, N)
+        tile_size = (4, N)  # herd size = 4 (4 AIE cores)
+        launch_size = tuple(i // t for i, t in zip(input_size, tile_size))
+
+        pipeline = (
+            "builtin.module("
+            + ",".join(
+                [
+                    f"func.func(air-wrap-func-with-parallel{{loop-bounds={launch_size[0]},{launch_size[1]},1}})",
+                    "air-par-to-launch{depth=-1 has-air-segment=true}",
+                    "air-copy-to-dma",
+                    "canonicalize",
+                    "cse",
+                ]
+            )
+            + ")"
+        )
+        pm = air.passmanager.PassManager.parse(pipeline)
+        pm.run(air_module.operation)
 
     ###############################################
     # Run compile and load

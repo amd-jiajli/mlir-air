@@ -105,10 +105,65 @@ vector.reduction<add> accumulator → scalar  // Only once!
 make compile-xclbin TRANSFORM_SCRIPT=/path/to/transform_aie2p_reduction_hoisted.mlir
 ```
 
+## Pre-Transformed IR Optimization (NEW!)
+
+**Status:** ✅ WORKING - Both baseline and optimized IR pass validation!
+
+**Summary:** Created infrastructure to bypass transform script and load pre-modified IR directly for testing reduction optimizations.
+
+**Files Created:**
+- `baseline_transformed.mlir`: Step 59 output from normal pipeline (scalar accumulation inside loops)
+- `optimized_transformed.mlir`: Hand-optimized with vector accumulation pattern
+
+**Key Optimization Pattern:**
+```mlir
+// BEFORE (baseline): Scalar reduction inside loop - 32 reductions
+scf.for ... {
+  %chunk = vector.transfer_read ...
+  %acc = memref.load %alloc[0]          // Load scalar acc
+  %reduced = vector.reduction <add>, %chunk, %acc  // EXPENSIVE
+  memref.store %reduced, %alloc[0]      // Store every iteration
+}
+
+// AFTER (optimized): Vector accumulation, single final reduction
+%final_vec = scf.for ... iter_args(%acc_vec = %zeros) {
+  %chunk = vector.transfer_read ...
+  %new_acc = arith.addf %chunk, %acc_vec  // CHEAP vector add
+  scf.yield %new_acc
+}
+%sum = vector.reduction <add>, %final_vec  // Only ONE reduction!
+```
+
+**Test Results:**
+| IR Version | Compilation | Validation |
+|------------|-------------|------------|
+| baseline_transformed.mlir | ✅ PASS | ✅ PASS |
+| optimized_transformed.mlir | ✅ PASS | ✅ PASS |
+
+**Usage:**
+```bash
+# Test baseline
+python3 run.py --pre-transformed-ir baseline_transformed.mlir
+
+# Test optimized
+python3 run.py --pre-transformed-ir optimized_transformed.mlir
+
+# Profile (after generating test.exe)
+python3 run.py --pre-transformed-ir optimized_transformed.mlir --compile-only
+./test.exe
+```
+
+**Next Steps:**
+1. Profile both versions to measure actual performance difference
+2. If optimized version is faster, create transform script to automate the pattern
+3. Integrate pattern into main compilation pipeline
+
 ## Evolution Log
 
 | Date | Change |
 |------|--------|
+| 2026-02-16 | **BREAKTHROUGH**: Pre-transformed IR loading works - both baseline and optimized pass validation! |
+| 2026-02-16 | Created baseline_transformed.mlir and optimized_transformed.mlir |
 | 2026-02-12 | Created transform_aie2p_reduction_hoisted.mlir with documentation |
 | 2026-02-12 | Initialized Memory Bank structure |
 | 2026-02-11 | Split reduction optimization blocked by AIE 1D vector limitation |

@@ -108,6 +108,40 @@ transform.with_pdl_patterns {
         %fused_generic2 = transform.air.fuse_multi_op_linalg %generic3, %generic4
 
         //===================================================================
+        // PHASE 2.5: Reduction Splitting (EXPERIMENTAL)
+        //===================================================================
+        // PURPOSE: Split reduction dimension to enable partial accumulation
+        // in vectors, moving final scalar reduction outside the loop.
+        //
+        // Before: linalg.generic with iterator_types = ["parallel", "reduction"]
+        //         operates on tensor<4x1024xf32> → tensor<4xf32>
+        //
+        // After:  Two operations:
+        //         1. Partial reduction: tensor<4x32x32xf32> → tensor<4x32xf32>
+        //         2. Final reduction: tensor<4x32xf32> → tensor<4xf32>
+        
+        // DEBUG: Print IR before split_reduction
+        %func_before_split = transform.structured.match ops{["func.func"]} in %arg1 : (!pdl.operation) -> !pdl.operation
+        transform.print %func_before_split {name = "=== BEFORE split_reduction ==="} : !pdl.operation
+        
+        // Split the fused max reduction (generic1: extf → maxnumf)
+        // split_factor = 32: splits 1024 → 32 chunks of 32 elements
+        // insert_split_dimension = 0: inserts the new parallel dimension at position 0
+        // Returns 4 results: (init_or_alloc, fill, split_linalg, combining_linalg)
+        %init1, %fill_split1, %split_op1, %combiner1 = transform.structured.split_reduction %fused_generic1
+          { split_factor = 32, insert_split_dimension = 0 }
+          : (!pdl.operation) -> (!pdl.operation, !pdl.operation, !pdl.operation, !pdl.operation)
+          
+        // Split the fused sum reduction (generic2: extf → subf → exp → addf)
+        %init2, %fill_split2, %split_op2, %combiner2 = transform.structured.split_reduction %fused_generic2
+          { split_factor = 32, insert_split_dimension = 0 }
+          : (!pdl.operation) -> (!pdl.operation, !pdl.operation, !pdl.operation, !pdl.operation)
+        
+        // DEBUG: Print IR after split_reduction
+        %func_after_split = transform.structured.match ops{["func.func"]} in %arg1 : (!pdl.operation) -> !pdl.operation
+        transform.print %func_after_split {name = "=== AFTER split_reduction ==="} : !pdl.operation
+
+        //===================================================================
         // PHASE 3: Tiling and Producer-Consumer Fusion
         //===================================================================
         // STRATEGY: Use the final output operation (generic5) to drive tiling,
@@ -125,8 +159,10 @@ transform.with_pdl_patterns {
         // Fuse producer operations into the tiled loop in reverse dependency order
         // This creates a producer-consumer fusion chain where each operation is
         // computed within the same iteration as its consumers
-        %tiled_fused_generic_2, %4 = transform.structured.fuse_into_containing_op %fused_generic2 into %forall_5 : (!pdl.operation, !pdl.operation) -> (!pdl.operation, !pdl.operation)
-        %tiled_fused_generic_1, %5 = transform.structured.fuse_into_containing_op %fused_generic1 into %forall_5 : (!pdl.operation, !pdl.operation) -> (!pdl.operation, !pdl.operation)
+        // NOTE: After split_reduction, we have: init, fill, split_op, combiner
+        // The combiner produces the final scalar result and should be fused
+        %tiled_combiner_2, %4 = transform.structured.fuse_into_containing_op %combiner2 into %forall_5 : (!pdl.operation, !pdl.operation) -> (!pdl.operation, !pdl.operation)
+        %tiled_combiner_1, %5 = transform.structured.fuse_into_containing_op %combiner1 into %forall_5 : (!pdl.operation, !pdl.operation) -> (!pdl.operation, !pdl.operation)
         %fused_fill, %7 = transform.structured.fuse_into_containing_op %fill into %forall_5 : (!pdl.operation, !pdl.operation) -> (!pdl.operation, !pdl.operation)
 
         //===================================================================
