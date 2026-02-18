@@ -25,9 +25,8 @@ parser.add_argument(
     "--input-mlir",
     type=str,
     dest="input_mlir",
-    # default=os.path.join(script_dir, "input_ir/original.mlir"),
-    default=os.path.join(script_dir, "input_ir/4x1024_mul_inv_bf16.mlir"),
-    help="Input MLIR file path (default: input_ir/original.mlir)",
+    default=os.path.join(script_dir, "input_ir/initial/4x1024_1d.mlir"),
+    help="Input MLIR file path (default: input_ir/initial/4x1024_1d.mlir)",
 )
 parser.add_argument(
     "--transform-script",
@@ -52,17 +51,24 @@ parser.add_argument(
     help="N (reduction) dimension size",
 )
 parser.add_argument(
+    "--tile-rows",
+    type=int,
+    dest="tile_rows",
+    default=4,
+    help="Number of rows per herd tile (default: 4, use 16 for 4x4 herd)",
+)
+parser.add_argument(
+    "--herd-shape",
+    type=str,
+    dest="herd_shape",
+    default="1x4",
+    choices=["1x4", "4x4"],
+    help="Herd shape: '1x4' for 1D (4 cores), '4x4' for 2D (16 cores)",
+)
+parser.add_argument(
     "--compile-only",
     action="store_true",
     help="Only compile to xclbin without running validation (for profiling)",
-)
-parser.add_argument(
-    "--debug-ir",
-    type=str,
-    dest="debug_ir",
-    default=None,
-    metavar="OUTPUT_FILE",
-    help="Print the transformed IR to the specified file and exit (for debugging)",
 )
 parser.add_argument(
     "--verbose",
@@ -122,17 +128,32 @@ with air.ir.Context() as ctx, Location.unknown():
         print("Skipping transform script - using pre-transformed IR")
         
         ###############################################
-        # Binding scf.paralell to air hierarchies
+        # Binding scf.parallel to air hierarchies
         ###############################################
-        input_size = (M, N)
-        tile_size = (4, N)  # herd size = 4 (4 AIE cores)
-        launch_size = tuple(i // t for i, t in zip(input_size, tile_size))
+        # Parse herd shape (e.g., "1x4" -> (1, 4), "4x4" -> (4, 4))
+        herd_cols, herd_rows = map(int, args.herd_shape.split("x"))
+        total_cores = herd_cols * herd_rows
+        
+        if args.herd_shape == "4x4":
+            # 2D mode: 4×4 herd (16 cores)
+            # Input is 256×1024, each of 16 cores handles 1 row (256/16=16 rows total per launch)
+            # loop-bounds = (M/16, 1, 1) for outer loop
+            # But the transform creates scf.forall with 4×4 iteration, so we just need outer wrapping
+            launch_rows = M // total_cores
+            launch_size = (launch_rows, 1, 1)
+            print(f"Herd configuration: 4×4 (16 cores), launch size: {launch_size}")
+        else:
+            # 1D mode: 1×4 herd (4 cores)
+            input_size = (M, N)
+            tile_size = (args.tile_rows, N)
+            launch_size = (M // args.tile_rows, 1, 1)
+            print(f"Herd configuration: 1×{args.tile_rows} ({args.tile_rows} cores), launch size: {launch_size}")
 
         pipeline = (
             "builtin.module("
             + ",".join(
                 [
-                    f"func.func(air-wrap-func-with-parallel{{loop-bounds={launch_size[0]},{launch_size[1]},1}})",
+                    f"func.func(air-wrap-func-with-parallel{{loop-bounds={launch_size[0]},{launch_size[1]},{launch_size[2]}}})",
                     "air-par-to-launch{depth=-1 has-air-segment=true}",
                     "air-copy-to-dma",
                     "canonicalize",
@@ -186,29 +207,31 @@ with air.ir.Context() as ctx, Location.unknown():
         transform_ir = Module.parse(transform_ir_string)
         run_transform(transform_ir, air_module)
 
-        # Print the IR for debugging and exit if --debug-ir is specified
-        if args.debug_ir:
-            import os
-
-            output_file = args.debug_ir
-            os.makedirs(os.path.dirname(output_file) or ".", exist_ok=True)
-            with open(output_file, "w") as f:
-                f.write(str(air_module))
-            print(f"Transformed IR written to {output_file}")
-            exit(0)
-
         ###############################################
-        # Binding scf.paralell to air hierarchies
+        # Binding scf.parallel to air hierarchies
         ###############################################
-        input_size = (M, N)
-        tile_size = (4, N)  # herd size = 4 (4 AIE cores)
-        launch_size = tuple(i // t for i, t in zip(input_size, tile_size))
+        # Parse herd shape (e.g., "1x4" -> (1, 4), "4x4" -> (4, 4))
+        herd_cols, herd_rows = map(int, args.herd_shape.split("x"))
+        total_cores = herd_cols * herd_rows
+        
+        if args.herd_shape == "4x4":
+            # 2D mode: 4×4 herd (16 cores)
+            # Input is 256×1024, each of 16 cores handles 1 row (256/16=16 rows total per launch)
+            # loop-bounds = (M/16, 1, 1) for outer loop
+            # But the transform creates scf.forall with 4×4 iteration, so we just need outer wrapping
+            launch_rows = M // total_cores
+            launch_size = (launch_rows, 1, 1)
+            print(f"Herd configuration: 4×4 (16 cores), launch size: {launch_size}")
+        else:
+            # 1D mode: 1×4 herd (4 cores)
+            launch_size = (M // args.tile_rows, 1, 1)
+            print(f"Herd configuration: 1×{args.tile_rows} ({args.tile_rows} cores), launch size: {launch_size}")
 
         pipeline = (
             "builtin.module("
             + ",".join(
                 [
-                    f"func.func(air-wrap-func-with-parallel{{loop-bounds={launch_size[0]},{launch_size[1]},1}})",
+                    f"func.func(air-wrap-func-with-parallel{{loop-bounds={launch_size[0]},{launch_size[1]},{launch_size[2]}}})",
                     "air-par-to-launch{depth=-1 has-air-segment=true}",
                     "air-copy-to-dma",
                     "canonicalize",

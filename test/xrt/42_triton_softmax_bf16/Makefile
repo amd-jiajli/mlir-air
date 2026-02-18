@@ -18,9 +18,6 @@ endif
 M ?= 256
 N ?= 1024
 
-# Input MLIR file (can be overridden)
-INPUT_MLIR ?= $(srcdir)/input_ir/4x1024_mul_inv_bf16.mlir
-
 # Verbose mode (0 = minimal, 1 = enabled for pass logging and test output)
 VERBOSE ?= 0
 ifeq ($(VERBOSE),1)
@@ -37,26 +34,26 @@ else
   DEBUG_AIRCC_FLAG :=
 endif
 
-# Debug IR output path (used with debug_ir target)
-DEBUG_IR_PATH ?= ir_debug/final.mlir
-
-# Pre-transformed IR file (optional, bypasses transform script)
-PRE_TRANSFORMED_IR ?=
-
 # AIE target architecture and transform script selection
 # NPU1 (aie2) requires extern_func.cc compilation for getExpBf16
 # NPU2 (aie2p) uses native intrinsics, no external kernel needed
 ifeq ($(TARGET),npu1)
   AIE_TARGET := aie2-none-unknown-elf
-  TRANSFORM_SCRIPT ?= $(srcdir)/transform_aie2.mlir
+  TRANSFORM_SCRIPT_1D ?= $(srcdir)/transform_aie2.mlir
+  TRANSFORM_SCRIPT_2D ?= $(srcdir)/transform_aie2_2d.mlir
   NEEDS_KERNEL := yes
 else ifeq ($(TARGET),npu2)
   AIE_TARGET := aie2p-none-unknown-elf
-  TRANSFORM_SCRIPT ?= $(srcdir)/transform_aie2p.mlir
+  TRANSFORM_SCRIPT_1D ?= $(srcdir)/transform_aie2p.mlir
+  TRANSFORM_SCRIPT_2D ?= $(srcdir)/transform_aie2p_2d.mlir
   NEEDS_KERNEL := no
 else
   $(error Unknown TARGET: $(TARGET). Use npu1 or npu2)
 endif
+
+# Input MLIR files for 1D and 2D
+INPUT_MLIR_1D ?= $(srcdir)/input_ir/initial/4x1024_1d.mlir
+INPUT_MLIR_2D ?= $(srcdir)/input_ir/initial/4x4x1024_2d.mlir
 
 # Find aie-opt to get include directory
 AIEOPT_DIR := $(shell realpath $(dir $(shell which aie-opt))/..)
@@ -79,66 +76,74 @@ else
   powershell :=
 endif
 
-.PHONY: all run compile-kernel compile-xclbin profile build-test-exe debug_ir debug_aircc clean help \
-        compile-xclbin-pretransformed profile-pretransformed profile-baseline profile-optimized run-pretransformed
+.PHONY: all help clean compile-kernel build-test-exe \
+        run-1d compile-xclbin-1d profile-1d debug-aircc-1d \
+        run-2d compile-xclbin-2d profile-2d debug-aircc-2d \
+        run-pretransform-1d-baseline run-pretransform-1d-optimized \
+        profile-pretransform-1d-baseline profile-pretransform-1d-optimized \
+        run-pretransform-2d-optimized profile-pretransform-2d-optimized
 
-all: run
+# Default target: 2D (16 cores, best performance)
+all: run-2d
 
 help:
 	@echo "Triton Softmax BF16 Example for AMD AI Engine"
 	@echo ""
 	@echo "Usage:"
-	@echo "  make [TARGET=npu1|npu2] [M=256] [N=256]"
+	@echo "  make [TARGET=npu1|npu2] [M=256] [N=1024]"
 	@echo ""
-	@echo "Targets:"
-	@echo "  all            - Build and run (default)"
-	@echo "  run            - Compile kernel and run correctness test"
-	@echo "  compile-kernel - Compile extern_func.cc only"
-	@echo "  compile-xclbin - Compile xclbin without running tests"
-	@echo "  profile        - Run performance profiling with C++ executable"
-	@echo "  build-test-exe - Build the C++ test executable only"
-	@echo "  debug_ir       - Dump transformed IR to file and exit"
-	@echo "  debug_aircc    - Compile with per-pass IR output (fine-grained debugging)"
-	@echo "  compile-xclbin-pretransformed - Compile xclbin using pre-transformed IR"
-	@echo "  profile-pretransformed - Profile using pre-transformed IR"
-	@echo "  profile-baseline   - Profile baseline_transformed.mlir (current pipeline)"
-	@echo "  profile-optimized  - Profile optimized_transformed.mlir (vector accumulation)"
-	@echo "  run-pretransformed - Run validation using pre-transformed IR"
-	@echo "  clean          - Remove build artifacts"
-	@echo "  help           - Show this message"
+	@echo "============================================================"
+	@echo "1D HERD (1×4, 4 cores)"
+	@echo "============================================================"
+	@echo "  run-1d                          Run validation (transform script)"
+	@echo "  compile-xclbin-1d               Compile to xclbin only"
+	@echo "  profile-1d                      Profile performance"
+	@echo "  debug-aircc-1d                  Per-pass IR output for debugging"
 	@echo ""
-	@echo "Variables:"
-	@echo "  TARGET         - npu1 (Phoenix) or npu2 (Strix, default)"
-	@echo "  M              - Parallel dimension size (default: 256)"
-	@echo "  N              - Reduction dimension size (default: 1024)"
-	@echo "  INPUT_MLIR     - Input MLIR file path (default: input_ir/4x1024_mul_inv_fp32mul.mlir)"
-	@echo "  VERBOSE        - Enable verbose mode for pass logging and profiling (1 = enabled, default: 0)"
-	@echo "  DEBUG_AIRCC    - Enable per-pass IR output for fine-grained debugging (1 = enabled, default: 0)"
-	@echo "  DEBUG_IR_PATH  - Path for debug IR output (default: ir_debug/final.mlir)"
-	@echo "  TRANSFORM_SCRIPT - Override transform script path (default: based on TARGET)"
-	@echo "  PRE_TRANSFORMED_IR - Pre-transformed IR file (bypasses transform script)"
-	@echo "  PEANO_INSTALL_DIR - Path to Peano compiler (auto-detected if in PATH)"
+	@echo "  Pre-transformed IR (skip transform script):"
+	@echo "  run-pretransform-1d-baseline    Run baseline_transformed.mlir"
+	@echo "  run-pretransform-1d-optimized   Run optimized_transformed.mlir"
+	@echo "  profile-pretransform-1d-baseline   Profile baseline (scalar reduction)"
+	@echo "  profile-pretransform-1d-optimized  Profile optimized (vector accumulation)"
 	@echo ""
-	@echo "Transform scripts:"
-	@echo "  NPU1 (aie2):  transform_aie2.mlir"
-	@echo "  NPU2 (aie2p): transform_aie2p.mlir"
+	@echo "============================================================"
+	@echo "2D HERD (4×4, 16 cores) - DEFAULT"
+	@echo "============================================================"
+	@echo "  run-2d                          Run validation (transform script)"
+	@echo "  compile-xclbin-2d               Compile to xclbin only"
+	@echo "  profile-2d                      Profile performance (~123us)"
+	@echo "  debug-aircc-2d                  Per-pass IR output for debugging"
+	@echo ""
+	@echo "  Pre-transformed IR (skip transform script):"
+	@echo "  run-pretransform-2d-optimized   Run optimized_transformed_2d.mlir"
+	@echo "  profile-pretransform-2d-optimized  Profile optimized (~75us, 39%% faster)"
+	@echo ""
+	@echo "============================================================"
+	@echo "UTILITY"
+	@echo "============================================================"
+	@echo "  compile-kernel                  Compile extern_func.cc (NPU1 only)"
+	@echo "  build-test-exe                  Build C++ profiler executable"
+	@echo "  clean                           Remove build artifacts"
+	@echo "  help                            Show this message"
+	@echo ""
+	@echo "============================================================"
+	@echo "VARIABLES"
+	@echo "============================================================"
+	@echo "  TARGET       npu1 (Phoenix) or npu2 (Strix, default)"
+	@echo "  M            Parallel dimension size (default: 256)"
+	@echo "  N            Reduction dimension size (default: 1024)"
+	@echo "  VERBOSE      Enable verbose mode (1 = enabled, default: 0)"
+	@echo "  DEBUG_AIRCC  Enable per-pass IR output (1 = enabled, default: 0)"
 	@echo ""
 	@echo "Examples:"
-	@echo "  make TARGET=npu2                    # Run on NPU2 with defaults"
-	@echo "  make TARGET=npu1 M=512 N=256        # Run on NPU1 with custom size"
-	@echo "  make profile M=256 N=256            # Profile performance"
-	@echo "  make compile-xclbin VERBOSE=1       # Compile with pass logging"
-	@echo "  make debug_aircc                    # Compile with per-pass IR output"
-	@echo "  make run DEBUG_AIRCC=1              # Run with per-pass IR output"
-	@echo "  make compile-kernel                 # Just compile the kernel"
-	@echo "  make INPUT_MLIR=4x256.mlir          # Use custom input MLIR file"
-	@echo "  make TRANSFORM_SCRIPT=my_transform.mlir  # Use custom transform script"
-	@echo ""
-	@echo "Pre-transformed IR examples (for reduction optimization testing):"
-	@echo "  make profile-baseline                    # Profile baseline (scalar reduction in loop)"
-	@echo "  make profile-optimized                   # Profile optimized (vector accumulation)"
-	@echo "  make profile-pretransformed PRE_TRANSFORMED_IR=my_ir.mlir"
-	@echo "  make run-pretransformed PRE_TRANSFORMED_IR=optimized_transformed.mlir"
+	@echo "  make                            # Default: run-2d"
+	@echo "  make run-1d                     # Run 1D validation"
+	@echo "  make profile-2d                 # Profile 2D baseline"
+	@echo "  make profile-pretransform-2d-optimized  # Best performance (75us)"
+
+# ============================================================
+# UTILITY TARGETS
+# ============================================================
 
 compile-kernel:
 	@mkdir -p $(BUILD_DIR)
@@ -165,51 +170,6 @@ compile-kernel:
 	fi
 	@echo "Kernel compiled successfully: $(BUILD_DIR)/extern_func.o"
 
-# Run correctness validation
-# NPU1 requires kernel compilation, NPU2 doesn't
-ifeq ($(NEEDS_KERNEL),yes)
-run: compile-kernel
-else
-run:
-endif
-	@mkdir -p $(BUILD_DIR)
-	@echo "Running softmax bf16 test with M=$(M), N=$(N) on $(TARGET)..."
-	@echo "Using transform script: $(TRANSFORM_SCRIPT)"
-	@echo "Using input MLIR: $(INPUT_MLIR)"
-	@cd $(BUILD_DIR) && PEANO_INSTALL_DIR=$(PEANO_INSTALL_DIR) \
-		$(powershell) python3 $(srcdir)/run.py \
-			--input-mlir $(INPUT_MLIR) \
-			--transform-script $(TRANSFORM_SCRIPT) \
-			--M $(M) \
-			--N $(N) \
-			$(VERBOSE_FLAG) \
-			$(DEBUG_AIRCC_FLAG)
-
-# Compile xclbin only (no execution)
-# NPU1 requires kernel compilation, NPU2 doesn't
-ifeq ($(NEEDS_KERNEL),yes)
-compile-xclbin: compile-kernel
-else
-compile-xclbin:
-endif
-	@mkdir -p $(BUILD_DIR)
-	@echo "Using transform script: $(TRANSFORM_SCRIPT)"
-	@echo "Using input MLIR: $(INPUT_MLIR)"
-	@cd $(BUILD_DIR) && PEANO_INSTALL_DIR=$(PEANO_INSTALL_DIR) \
-		$(powershell) python3 $(srcdir)/run.py \
-			--input-mlir $(INPUT_MLIR) \
-			--transform-script $(TRANSFORM_SCRIPT) \
-			--M $(M) \
-			--N $(N) \
-			--compile-only \
-			$(VERBOSE_FLAG) \
-			$(DEBUG_AIRCC_FLAG)
-
-# Profile using C++ executable
-profile: compile-xclbin build-test-exe
-	cd $(BUILD_DIR) && ./test.exe -x air.xclbin -k MLIR_AIE -i air.insts.bin -M $(M) -N $(N) -v $(VERBOSE)
-
-# Build the C++ test executable
 build-test-exe:
 	@GPP=$$( \
 		for bin in /usr/bin/g++-*; do \
@@ -241,139 +201,251 @@ build-test-exe:
 		-L$(AIEOPT_DIR)/runtime_lib/x86_64/test_lib/lib \
 		-luuid -lxrt_coreutil -lrt -lstdc++ -ltest_utils
 
-# Debug IR: dump transformed IR to file and exit
-# NPU1 requires kernel compilation, NPU2 doesn't
-ifeq ($(NEEDS_KERNEL),yes)
-debug_ir: compile-kernel
-else
-debug_ir:
-endif
-	@mkdir -p $(BUILD_DIR)
-	@echo "Using transform script: $(TRANSFORM_SCRIPT)"
-	@echo "Using input MLIR: $(INPUT_MLIR)"
-	@cd $(BUILD_DIR) && PEANO_INSTALL_DIR=$(PEANO_INSTALL_DIR) \
-		$(powershell) python3 $(srcdir)/run.py \
-			--input-mlir $(INPUT_MLIR) \
-			--transform-script $(TRANSFORM_SCRIPT) \
-			--M $(M) \
-			--N $(N) \
-			--debug-ir $(DEBUG_IR_PATH)
+clean:
+	rm -rf build_* __pycache__ debug_output air_project
+	@echo "Cleaned build directories"
 
-# Debug AIRCC: compile with per-pass IR output for fine-grained debugging
-# NPU1 requires kernel compilation, NPU2 doesn't
+# ============================================================
+# 1D HERD (1×4, 4 cores) TARGETS
+# ============================================================
+
+# Run validation (1D, 4 cores)
 ifeq ($(NEEDS_KERNEL),yes)
-debug_aircc: compile-kernel
+run-1d: compile-kernel
 else
-debug_aircc:
+run-1d:
 endif
 	@mkdir -p $(BUILD_DIR)
-	@echo "Debug AIRCC mode: emitting IR after each individual pass..."
-	@echo "Using transform script: $(TRANSFORM_SCRIPT)"
-	@echo "Using input MLIR: $(INPUT_MLIR)"
+	@echo "Running 1D softmax (1×4 herd, 4 cores)..."
+	@echo "Using transform script: $(TRANSFORM_SCRIPT_1D)"
+	@echo "Using input MLIR: $(INPUT_MLIR_1D)"
 	@cd $(BUILD_DIR) && PEANO_INSTALL_DIR=$(PEANO_INSTALL_DIR) \
 		$(powershell) python3 $(srcdir)/run.py \
-			--input-mlir $(INPUT_MLIR) \
-			--transform-script $(TRANSFORM_SCRIPT) \
+			--input-mlir $(INPUT_MLIR_1D) \
+			--transform-script $(TRANSFORM_SCRIPT_1D) \
 			--M $(M) \
 			--N $(N) \
+			--tile-rows 4 \
+			--herd-shape 1x4 \
+			$(VERBOSE_FLAG) \
+			$(DEBUG_AIRCC_FLAG)
+
+# Compile xclbin only (1D)
+ifeq ($(NEEDS_KERNEL),yes)
+compile-xclbin-1d: compile-kernel
+else
+compile-xclbin-1d:
+endif
+	@mkdir -p $(BUILD_DIR)
+	@echo "Compiling 1D softmax (1×4 herd, 4 cores)..."
+	@echo "Using transform script: $(TRANSFORM_SCRIPT_1D)"
+	@echo "Using input MLIR: $(INPUT_MLIR_1D)"
+	@cd $(BUILD_DIR) && PEANO_INSTALL_DIR=$(PEANO_INSTALL_DIR) \
+		$(powershell) python3 $(srcdir)/run.py \
+			--input-mlir $(INPUT_MLIR_1D) \
+			--transform-script $(TRANSFORM_SCRIPT_1D) \
+			--M $(M) \
+			--N $(N) \
+			--tile-rows 4 \
+			--herd-shape 1x4 \
+			--compile-only \
+			$(VERBOSE_FLAG) \
+			$(DEBUG_AIRCC_FLAG)
+
+# Profile (1D)
+profile-1d: compile-xclbin-1d build-test-exe
+	@echo ""
+	@echo "Profiling 1D softmax..."
+	cd $(BUILD_DIR) && ./test.exe -x air.xclbin -k MLIR_AIE -i air.insts.bin -M $(M) -N $(N) -v $(VERBOSE)
+
+# Debug AIRCC (1D)
+ifeq ($(NEEDS_KERNEL),yes)
+debug-aircc-1d: compile-kernel
+else
+debug-aircc-1d:
+endif
+	@mkdir -p $(BUILD_DIR)
+	@echo "Debug AIRCC mode (1D): emitting IR after each individual pass..."
+	@cd $(BUILD_DIR) && PEANO_INSTALL_DIR=$(PEANO_INSTALL_DIR) \
+		$(powershell) python3 $(srcdir)/run.py \
+			--input-mlir $(INPUT_MLIR_1D) \
+			--transform-script $(TRANSFORM_SCRIPT_1D) \
+			--M $(M) \
+			--N $(N) \
+			--tile-rows 4 \
+			--herd-shape 1x4 \
 			--compile-only \
 			--verbose \
 			--debug-aircc
 	@echo ""
 	@echo "Debug IR files saved to: $(BUILD_DIR)/air_project/debug_ir/"
-	@echo "Pass log saved to: $(BUILD_DIR)/air_project/pass.log"
 
 # ============================================================
-# Pre-transformed IR targets (for reduction optimization testing)
+# 1D PRE-TRANSFORMED IR TARGETS
 # ============================================================
 
-# Compile xclbin using pre-transformed IR (bypasses transform script)
-compile-xclbin-pretransformed:
-	@if [ -z "$(PRE_TRANSFORMED_IR)" ]; then \
-		echo "Error: PRE_TRANSFORMED_IR must be specified"; \
-		echo "Usage: make compile-xclbin-pretransformed PRE_TRANSFORMED_IR=baseline_transformed.mlir"; \
-		exit 1; \
-	fi
+# Run validation with baseline_transformed.mlir (1D)
+run-pretransform-1d-baseline:
 	@mkdir -p $(BUILD_DIR)
-	@echo "Using pre-transformed IR: $(PRE_TRANSFORMED_IR)"
-	@cd $(BUILD_DIR) && PEANO_INSTALL_DIR=$(PEANO_INSTALL_DIR) \
-		$(powershell) python3 $(srcdir)/run.py \
-			--pre-transformed-ir $(srcdir)/$(PRE_TRANSFORMED_IR) \
-			--M $(M) \
-			--N $(N) \
-			--compile-only \
-			$(VERBOSE_FLAG) \
-			$(DEBUG_AIRCC_FLAG)
-
-# Run validation using pre-transformed IR
-run-pretransformed:
-	@if [ -z "$(PRE_TRANSFORMED_IR)" ]; then \
-		echo "Error: PRE_TRANSFORMED_IR must be specified"; \
-		echo "Usage: make run-pretransformed PRE_TRANSFORMED_IR=optimized_transformed.mlir"; \
-		exit 1; \
-	fi
-	@mkdir -p $(BUILD_DIR)
-	@echo "Running validation with pre-transformed IR: $(PRE_TRANSFORMED_IR)"
-	@cd $(BUILD_DIR) && PEANO_INSTALL_DIR=$(PEANO_INSTALL_DIR) \
-		$(powershell) python3 $(srcdir)/run.py \
-			--pre-transformed-ir $(srcdir)/$(PRE_TRANSFORMED_IR) \
-			--M $(M) \
-			--N $(N) \
-			$(VERBOSE_FLAG) \
-			$(DEBUG_AIRCC_FLAG)
-
-# Profile using pre-transformed IR
-profile-pretransformed: build-test-exe
-	@if [ -z "$(PRE_TRANSFORMED_IR)" ]; then \
-		echo "Error: PRE_TRANSFORMED_IR must be specified"; \
-		echo "Usage: make profile-pretransformed PRE_TRANSFORMED_IR=optimized_transformed.mlir"; \
-		exit 1; \
-	fi
-	@mkdir -p $(BUILD_DIR)
-	@echo "Compiling pre-transformed IR: $(PRE_TRANSFORMED_IR)"
-	@cd $(BUILD_DIR) && PEANO_INSTALL_DIR=$(PEANO_INSTALL_DIR) \
-		$(powershell) python3 $(srcdir)/run.py \
-			--pre-transformed-ir $(srcdir)/$(PRE_TRANSFORMED_IR) \
-			--M $(M) \
-			--N $(N) \
-			--compile-only \
-			$(VERBOSE_FLAG)
-	@echo ""
-	@echo "Running profiling..."
-	cd $(BUILD_DIR) && ./test.exe -x air.xclbin -k MLIR_AIE -i air.insts.bin -M $(M) -N $(N) -v $(VERBOSE)
-
-# Convenience target: profile baseline (current pipeline output with scalar reduction)
-profile-baseline: build-test-exe
-	@mkdir -p $(BUILD_DIR)
-	@echo "Profiling BASELINE (scalar reduction inside loop)..."
+	@echo "Running 1D BASELINE (pre-transformed IR)..."
 	@echo "Using: baseline_transformed.mlir"
 	@cd $(BUILD_DIR) && PEANO_INSTALL_DIR=$(PEANO_INSTALL_DIR) \
 		$(powershell) python3 $(srcdir)/run.py \
-			--pre-transformed-ir $(srcdir)/baseline_transformed.mlir \
+			--pre-transformed-ir $(srcdir)/input_ir/pre-transformed/4x1024_baseline_1d.mlir \
 			--M $(M) \
 			--N $(N) \
-			--compile-only \
-			$(VERBOSE_FLAG)
-	@echo ""
-	@echo "Running profiling..."
-	cd $(BUILD_DIR) && ./test.exe -x air.xclbin -k MLIR_AIE -i air.insts.bin -M $(M) -N $(N) -v $(VERBOSE)
+			--tile-rows 4 \
+			--herd-shape 1x4 \
+			$(VERBOSE_FLAG) \
+			$(DEBUG_AIRCC_FLAG)
 
-# Convenience target: profile optimized (vector accumulation pattern)
-profile-optimized: build-test-exe
+# Run validation with optimized_transformed.mlir (1D)
+run-pretransform-1d-optimized:
 	@mkdir -p $(BUILD_DIR)
-	@echo "Profiling OPTIMIZED (vector accumulation, single post-loop reduction)..."
-	@echo "Using: optimized_transformed.mlir"
+	@echo "Running 1D OPTIMIZED (pre-transformed IR)..."
+	@echo "Using: 4x1024_optimized_1d.mlir"
 	@cd $(BUILD_DIR) && PEANO_INSTALL_DIR=$(PEANO_INSTALL_DIR) \
 		$(powershell) python3 $(srcdir)/run.py \
-			--pre-transformed-ir $(srcdir)/optimized_transformed.mlir \
+			--pre-transformed-ir $(srcdir)/input_ir/pre-transformed/4x1024_optimized_1d.mlir \
 			--M $(M) \
 			--N $(N) \
+			--tile-rows 4 \
+			--herd-shape 1x4 \
+			$(VERBOSE_FLAG) \
+			$(DEBUG_AIRCC_FLAG)
+
+# Profile baseline_transformed.mlir (1D)
+profile-pretransform-1d-baseline: build-test-exe
+	@mkdir -p $(BUILD_DIR)
+	@echo "Profiling 1D BASELINE (scalar reduction inside loop)..."
+	@echo "Using: 4x1024_baseline_1d.mlir"
+	@cd $(BUILD_DIR) && PEANO_INSTALL_DIR=$(PEANO_INSTALL_DIR) \
+		$(powershell) python3 $(srcdir)/run.py \
+			--pre-transformed-ir $(srcdir)/input_ir/pre-transformed/4x1024_baseline_1d.mlir \
+			--M $(M) \
+			--N $(N) \
+			--tile-rows 4 \
+			--herd-shape 1x4 \
 			--compile-only \
 			$(VERBOSE_FLAG)
 	@echo ""
 	@echo "Running profiling..."
 	cd $(BUILD_DIR) && ./test.exe -x air.xclbin -k MLIR_AIE -i air.insts.bin -M $(M) -N $(N) -v $(VERBOSE)
 
-clean:
-	rm -rf build_* __pycache__
-	@echo "Cleaned build directories"
+# Profile optimized_transformed.mlir (1D)
+profile-pretransform-1d-optimized: build-test-exe
+	@mkdir -p $(BUILD_DIR)
+	@echo "Profiling 1D OPTIMIZED (vector accumulation, single post-loop reduction)..."
+	@echo "Using: 4x1024_optimized_1d.mlir"
+	@cd $(BUILD_DIR) && PEANO_INSTALL_DIR=$(PEANO_INSTALL_DIR) \
+		$(powershell) python3 $(srcdir)/run.py \
+			--pre-transformed-ir $(srcdir)/input_ir/pre-transformed/4x1024_optimized_1d.mlir \
+			--M $(M) \
+			--N $(N) \
+			--tile-rows 4 \
+			--herd-shape 1x4 \
+			--compile-only \
+			$(VERBOSE_FLAG)
+	@echo ""
+	@echo "Running profiling..."
+	cd $(BUILD_DIR) && ./test.exe -x air.xclbin -k MLIR_AIE -i air.insts.bin -M $(M) -N $(N) -v $(VERBOSE)
+
+# ============================================================
+# 2D HERD (4×4, 16 cores) TARGETS
+# ============================================================
+
+# Run validation (2D, 16 cores)
+run-2d:
+	@mkdir -p $(BUILD_DIR)
+	@echo "Running 2D softmax (4×4 herd, 16 cores)..."
+	@echo "Using transform script: $(TRANSFORM_SCRIPT_2D)"
+	@echo "Using input MLIR: $(INPUT_MLIR_2D)"
+	@cd $(BUILD_DIR) && PEANO_INSTALL_DIR=$(PEANO_INSTALL_DIR) \
+		$(powershell) python3 $(srcdir)/run.py \
+			--input-mlir $(INPUT_MLIR_2D) \
+			--transform-script $(TRANSFORM_SCRIPT_2D) \
+			--M $(M) \
+			--N $(N) \
+			--tile-rows 16 \
+			--herd-shape 4x4 \
+			$(VERBOSE_FLAG) \
+			$(DEBUG_AIRCC_FLAG)
+
+# Compile xclbin only (2D)
+compile-xclbin-2d:
+	@mkdir -p $(BUILD_DIR)
+	@echo "Compiling 2D softmax (4×4 herd, 16 cores)..."
+	@echo "Using transform script: $(TRANSFORM_SCRIPT_2D)"
+	@echo "Using input MLIR: $(INPUT_MLIR_2D)"
+	@cd $(BUILD_DIR) && PEANO_INSTALL_DIR=$(PEANO_INSTALL_DIR) \
+		$(powershell) python3 $(srcdir)/run.py \
+			--input-mlir $(INPUT_MLIR_2D) \
+			--transform-script $(TRANSFORM_SCRIPT_2D) \
+			--M $(M) \
+			--N $(N) \
+			--tile-rows 16 \
+			--herd-shape 4x4 \
+			--compile-only \
+			$(VERBOSE_FLAG) \
+			$(DEBUG_AIRCC_FLAG)
+
+# Profile (2D)
+profile-2d: compile-xclbin-2d build-test-exe
+	@echo ""
+	@echo "Profiling 2D softmax..."
+	cd $(BUILD_DIR) && ./test.exe -x air.xclbin -k MLIR_AIE -i air.insts.bin -M $(M) -N $(N) -v $(VERBOSE)
+
+# Debug AIRCC (2D)
+debug-aircc-2d:
+	@mkdir -p $(BUILD_DIR)
+	@echo "Debug AIRCC mode (2D): emitting IR after each individual pass..."
+	@cd $(BUILD_DIR) && PEANO_INSTALL_DIR=$(PEANO_INSTALL_DIR) \
+		$(powershell) python3 $(srcdir)/run.py \
+			--input-mlir $(INPUT_MLIR_2D) \
+			--transform-script $(TRANSFORM_SCRIPT_2D) \
+			--M $(M) \
+			--N $(N) \
+			--tile-rows 16 \
+			--herd-shape 4x4 \
+			--compile-only \
+			--verbose \
+			--debug-aircc
+	@echo ""
+	@echo "Debug IR files saved to: $(BUILD_DIR)/air_project/debug_ir/"
+
+# ============================================================
+# 2D PRE-TRANSFORMED IR TARGETS
+# ============================================================
+
+# Run validation with optimized_transformed_2d.mlir (2D)
+run-pretransform-2d-optimized:
+	@mkdir -p $(BUILD_DIR)
+	@echo "Running 2D OPTIMIZED (pre-transformed IR)..."
+	@echo "Using: 4x4x1024_optimized_2d.mlir (hoisted reductions)"
+	@cd $(BUILD_DIR) && PEANO_INSTALL_DIR=$(PEANO_INSTALL_DIR) \
+		$(powershell) python3 $(srcdir)/run.py \
+			--pre-transformed-ir $(srcdir)/input_ir/pre-transformed/4x4x1024_optimized_2d.mlir \
+			--M $(M) \
+			--N $(N) \
+			--tile-rows 16 \
+			--herd-shape 4x4 \
+			$(VERBOSE_FLAG) \
+			$(DEBUG_AIRCC_FLAG)
+
+# Profile optimized_transformed_2d.mlir (2D)
+profile-pretransform-2d-optimized: build-test-exe
+	@mkdir -p $(BUILD_DIR)
+	@echo "Profiling 2D OPTIMIZED (4×4 herd, hoisted reductions)..."
+	@echo "Using: 4x4x1024_optimized_2d.mlir"
+	@cd $(BUILD_DIR) && PEANO_INSTALL_DIR=$(PEANO_INSTALL_DIR) \
+		$(powershell) python3 $(srcdir)/run.py \
+			--pre-transformed-ir $(srcdir)/input_ir/pre-transformed/4x4x1024_optimized_2d.mlir \
+			--M $(M) \
+			--N $(N) \
+			--tile-rows 16 \
+			--herd-shape 4x4 \
+			--compile-only \
+			$(VERBOSE_FLAG)
+	@echo ""
+	@echo "Running profiling..."
+	cd $(BUILD_DIR) && ./test.exe -x air.xclbin -k MLIR_AIE -i air.insts.bin -M $(M) -N $(N) -v $(VERBOSE)
