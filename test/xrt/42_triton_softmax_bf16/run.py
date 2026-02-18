@@ -118,22 +118,24 @@ with air.ir.Context() as ctx, Location.unknown():
         ## Load Pre-Transformed IR Directly
         ################################################
         pre_transformed_path = args.pre_transformed_ir
-        if not os.path.isabs(pre_transformed_path) and not os.path.exists(pre_transformed_path):
+        if not os.path.isabs(pre_transformed_path) and not os.path.exists(
+            pre_transformed_path
+        ):
             pre_transformed_path = os.path.join(script_dir, pre_transformed_path)
-        
+
         print(f"Loading pre-transformed IR from: {pre_transformed_path}")
         with open(pre_transformed_path, "r") as f:
             pre_transformed_ir_string = f.read()
         air_module = Module.parse(pre_transformed_ir_string)
         print("Skipping transform script - using pre-transformed IR")
-        
+
         ###############################################
         # Binding scf.parallel to air hierarchies
         ###############################################
         # Parse herd shape (e.g., "1x4" -> (1, 4), "4x4" -> (4, 4))
         herd_cols, herd_rows = map(int, args.herd_shape.split("x"))
         total_cores = herd_cols * herd_rows
-        
+
         if args.herd_shape == "4x4":
             # 2D mode: 4×4 herd (16 cores)
             # Input is 256×1024, each of 16 cores handles 1 row (256/16=16 rows total per launch)
@@ -147,7 +149,9 @@ with air.ir.Context() as ctx, Location.unknown():
             input_size = (M, N)
             tile_size = (args.tile_rows, N)
             launch_size = (M // args.tile_rows, 1, 1)
-            print(f"Herd configuration: 1×{args.tile_rows} ({args.tile_rows} cores), launch size: {launch_size}")
+            print(
+                f"Herd configuration: 1×{args.tile_rows} ({args.tile_rows} cores), launch size: {launch_size}"
+            )
 
         pipeline = (
             "builtin.module("
@@ -213,7 +217,7 @@ with air.ir.Context() as ctx, Location.unknown():
         # Parse herd shape (e.g., "1x4" -> (1, 4), "4x4" -> (4, 4))
         herd_cols, herd_rows = map(int, args.herd_shape.split("x"))
         total_cores = herd_cols * herd_rows
-        
+
         if args.herd_shape == "4x4":
             # 2D mode: 4×4 herd (16 cores)
             # Input is 256×1024, each of 16 cores handles 1 row (256/16=16 rows total per launch)
@@ -225,7 +229,9 @@ with air.ir.Context() as ctx, Location.unknown():
         else:
             # 1D mode: 1×4 herd (4 cores)
             launch_size = (M // args.tile_rows, 1, 1)
-            print(f"Herd configuration: 1×{args.tile_rows} ({args.tile_rows} cores), launch size: {launch_size}")
+            print(
+                f"Herd configuration: 1×{args.tile_rows} ({args.tile_rows} cores), launch size: {launch_size}"
+            )
 
         pipeline = (
             "builtin.module("
