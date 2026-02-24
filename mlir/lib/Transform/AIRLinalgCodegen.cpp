@@ -5510,6 +5510,411 @@ transform::NormalizeForBoundsOp::apply(transform::TransformRewriter &rewriter,
 }
 
 //===----------------------------------------------------------------------===//
+// HoistVectorReductionOp
+//===----------------------------------------------------------------------===//
+
+/// Given a vector::CombiningKind, return the corresponding element-wise
+/// vector operation that replaces the scalar reduction inside a loop.
+/// For example, CombiningKind::ADD maps to arith.addf (for floats).
+static Value createElementwiseOp(OpBuilder &builder, Location loc,
+                                 vector::CombiningKind kind, Value lhs,
+                                 Value rhs) {
+  auto vecType = cast<VectorType>(lhs.getType());
+  Type elemType = vecType.getElementType();
+  bool isFloat = isa<FloatType>(elemType);
+
+  switch (kind) {
+  case vector::CombiningKind::ADD:
+    if (isFloat)
+      return arith::AddFOp::create(builder, loc, lhs, rhs).getResult();
+    return arith::AddIOp::create(builder, loc, lhs, rhs).getResult();
+  case vector::CombiningKind::MUL:
+    if (isFloat)
+      return arith::MulFOp::create(builder, loc, lhs, rhs).getResult();
+    return arith::MulIOp::create(builder, loc, lhs, rhs).getResult();
+  case vector::CombiningKind::MAXNUMF:
+    return arith::MaxNumFOp::create(builder, loc, lhs, rhs).getResult();
+  case vector::CombiningKind::MINNUMF:
+    return arith::MinNumFOp::create(builder, loc, lhs, rhs).getResult();
+  case vector::CombiningKind::MAXSI:
+    return arith::MaxSIOp::create(builder, loc, lhs, rhs).getResult();
+  case vector::CombiningKind::MINSI:
+    return arith::MinSIOp::create(builder, loc, lhs, rhs).getResult();
+  default:
+    return nullptr;
+  }
+}
+
+/// Get the identity element for a given reduction kind and element type,
+/// returned as a DenseElementsAttr for a vector constant.
+/// E.g., ADD -> 0, MUL -> 1, MAXNUMF -> -inf, MINNUMF -> +inf
+static Attribute getIdentityAttr(OpBuilder &builder, VectorType vecType,
+                                 vector::CombiningKind kind) {
+  Type elemType = vecType.getElementType();
+
+  if (auto floatType = dyn_cast<FloatType>(elemType)) {
+    APFloat val(floatType.getFloatSemantics());
+    switch (kind) {
+    case vector::CombiningKind::ADD:
+      val = APFloat::getZero(floatType.getFloatSemantics());
+      break;
+    case vector::CombiningKind::MUL:
+      val = APFloat(floatType.getFloatSemantics(), 1);
+      break;
+    case vector::CombiningKind::MAXNUMF:
+      val = APFloat::getInf(floatType.getFloatSemantics(), /*Negative=*/true);
+      break;
+    case vector::CombiningKind::MINNUMF:
+      val = APFloat::getInf(floatType.getFloatSemantics(), /*Negative=*/false);
+      break;
+    default:
+      return nullptr;
+    }
+    return DenseElementsAttr::get(vecType, val);
+  }
+
+  if (auto intType = dyn_cast<IntegerType>(elemType)) {
+    APInt val(intType.getWidth(), 0);
+    switch (kind) {
+    case vector::CombiningKind::ADD:
+      val = APInt(intType.getWidth(), 0);
+      break;
+    case vector::CombiningKind::MUL:
+      val = APInt(intType.getWidth(), 1);
+      break;
+    case vector::CombiningKind::MAXSI:
+      val = APInt::getSignedMinValue(intType.getWidth());
+      break;
+    case vector::CombiningKind::MINSI:
+      val = APInt::getSignedMaxValue(intType.getWidth());
+      break;
+    default:
+      return nullptr;
+    }
+    return DenseElementsAttr::get(vecType, val);
+  }
+
+  return nullptr;
+}
+
+/// Describes a vector.reduction inside an scf.for loop that is eligible for
+/// hoisting: the accumulator is a scalar loaded from memory (optionally cast),
+/// and the result is stored back (optionally cast).
+struct ReductionHoistInfo {
+  scf::ForOp forOp;
+  vector::ReductionOp reductionOp;
+  memref::LoadOp accLoad;      // The load of the scalar accumulator
+  memref::StoreOp resultStore;  // The store of the reduction result
+  arith::TruncFOp truncBeforeReduce;  // Optional truncf before reduction
+  arith::ExtFOp extAfterReduce;       // Optional extf after reduction
+  memref::StoreOp initStore;   // The store that initializes the accumulator
+                                // before the loop
+};
+
+/// Try to match the reduction-in-loop pattern within a given scf.for.
+/// Returns nullopt if no match.
+static std::optional<ReductionHoistInfo>
+matchReductionInLoop(scf::ForOp forOp) {
+  // Find vector.reduction ops in the loop body
+  SmallVector<vector::ReductionOp> reductions;
+  forOp.getBody()->walk(
+      [&](vector::ReductionOp op) { reductions.push_back(op); });
+
+  if (reductions.size() != 1)
+    return std::nullopt;
+
+  auto reductionOp = reductions[0];
+
+  // The reduction must have an accumulator operand (the scalar)
+  Value acc = reductionOp.getAcc();
+  if (!acc)
+    return std::nullopt;
+
+  // Trace the accumulator back: it should come from memref.load,
+  // possibly through arith.truncf
+  memref::LoadOp accLoad = nullptr;
+  arith::TruncFOp truncBeforeReduce = nullptr;
+
+  if (auto truncf = acc.getDefiningOp<arith::TruncFOp>()) {
+    truncBeforeReduce = truncf;
+    accLoad = truncf.getIn().getDefiningOp<memref::LoadOp>();
+  } else {
+    accLoad = acc.getDefiningOp<memref::LoadOp>();
+  }
+
+  if (!accLoad)
+    return std::nullopt;
+
+  // Trace the result forward: it should go to memref.store,
+  // possibly through arith.extf
+  Value result = reductionOp.getDest();
+  memref::StoreOp resultStore = nullptr;
+  arith::ExtFOp extAfterReduce = nullptr;
+
+  for (auto &use : result.getUses()) {
+    if (auto extf = dyn_cast<arith::ExtFOp>(use.getOwner())) {
+      extAfterReduce = extf;
+      for (auto &extUse : extf.getOut().getUses()) {
+        if (auto store = dyn_cast<memref::StoreOp>(extUse.getOwner())) {
+          resultStore = store;
+          break;
+        }
+      }
+      break;
+    } else if (auto store = dyn_cast<memref::StoreOp>(use.getOwner())) {
+      resultStore = store;
+      break;
+    }
+  }
+
+  if (!resultStore)
+    return std::nullopt;
+
+  // The load and store must access the same memref and indices
+  if (accLoad.getMemRef() != resultStore.getMemRef())
+    return std::nullopt;
+
+  // Find the initializing store before the loop: scan backwards from the loop
+  // to find a memref.store to the same alloc with a constant value
+  memref::StoreOp initStore = nullptr;
+  Operation *curOp = forOp.getOperation();
+  while (curOp->getPrevNode()) {
+    curOp = curOp->getPrevNode();
+    if (auto store = dyn_cast<memref::StoreOp>(curOp)) {
+      if (store.getMemRef() == accLoad.getMemRef()) {
+        initStore = store;
+        break;
+      }
+    }
+  }
+
+  ReductionHoistInfo info;
+  info.forOp = forOp;
+  info.reductionOp = reductionOp;
+  info.accLoad = accLoad;
+  info.resultStore = resultStore;
+  info.truncBeforeReduce = truncBeforeReduce;
+  info.extAfterReduce = extAfterReduce;
+  info.initStore = initStore;
+  return info;
+}
+
+/// Perform the actual hoisting transformation on a matched pattern.
+static LogicalResult hoistReduction(ReductionHoistInfo &info,
+                                    OpBuilder &builder) {
+  auto forOp = info.forOp;
+  auto reductionOp = info.reductionOp;
+  auto kind = reductionOp.getKind();
+  Location loc = forOp.getLoc();
+
+  // Determine the vector type from the reduction input
+  auto vecType = cast<VectorType>(reductionOp.getVector().getType());
+
+  // Create the identity constant vector for this reduction kind
+  Attribute identityAttr = getIdentityAttr(builder, vecType, kind);
+  if (!identityAttr)
+    return failure();
+
+  // Build the init vector constant before the loop
+  builder.setInsertionPoint(forOp);
+  auto initVecConst =
+      arith::ConstantOp::create(builder, loc, vecType,
+                                 cast<TypedAttr>(identityAttr));
+
+  // Create new scf.for with the vector iter_arg
+  SmallVector<Value> newInitArgs(forOp.getInitArgs().begin(),
+                                 forOp.getInitArgs().end());
+  newInitArgs.push_back(initVecConst.getResult());
+
+  auto newForOp = scf::ForOp::create(builder, loc, forOp.getLowerBound(),
+                                      forOp.getUpperBound(), forOp.getStep(),
+                                      newInitArgs);
+
+  // Clone the old loop body into the new loop
+  Block *oldBody = forOp.getBody();
+  Block *newBody = newForOp.getBody();
+
+  // The new body already has args: [iv, old_iter_args..., new_vec_iter_arg]
+  // The new vector iter_arg is the last one
+  unsigned vecIterArgIdx = newForOp.getNumRegionIterArgs() - 1;
+  Value vecIterArg = newBody->getArgument(vecIterArgIdx + 1); // +1 for IV
+
+  builder.setInsertionPointToStart(newBody);
+  IRMapping mapping;
+
+  // Map induction variable
+  mapping.map(oldBody->getArgument(0), newBody->getArgument(0));
+
+  // Map existing iter_args
+  for (unsigned i = 0; i < forOp.getNumRegionIterArgs(); ++i) {
+    mapping.map(oldBody->getArgument(i + 1), newBody->getArgument(i + 1));
+  }
+
+  // Clone operations, replacing the reduction pattern
+  auto oldYield = cast<scf::YieldOp>(oldBody->getTerminator());
+  SmallVector<Value> newYieldOperands;
+
+  for (Operation &op : oldBody->without_terminator()) {
+    // Skip the accLoad - we use the iter_arg instead
+    if (&op == info.accLoad.getOperation())
+      continue;
+
+    // Skip the truncf before reduction (if present)
+    if (info.truncBeforeReduce &&
+        &op == info.truncBeforeReduce.getOperation())
+      continue;
+
+    // Replace the vector.reduction with element-wise vector op
+    if (&op == reductionOp.getOperation()) {
+      Value inputVec = mapping.lookup(reductionOp.getVector());
+      Value newAcc =
+          createElementwiseOp(builder, loc, kind, inputVec, vecIterArg);
+      if (!newAcc)
+        return failure();
+      // Map the reduction result - it won't be used directly since we
+      // replaced the pattern. But we need to handle the extf and store.
+      // We'll map the reduction result to a placeholder; the extf and store
+      // are skipped below.
+      mapping.map(reductionOp.getDest(), newAcc); // temporary mapping
+      // Remember the accumulated vector for the yield
+      vecIterArg = newAcc; // Update for the yield
+      continue;
+    }
+
+    // Skip the extf after reduction (if present)
+    if (info.extAfterReduce &&
+        &op == info.extAfterReduce.getOperation())
+      continue;
+
+    // Skip the result store - we'll store after the loop
+    if (&op == info.resultStore.getOperation())
+      continue;
+
+    // Clone all other operations normally
+    builder.clone(op, mapping);
+  }
+
+  // Build the yield: original yielded values + new vector accumulator
+  for (Value yieldVal : oldYield.getOperands()) {
+    newYieldOperands.push_back(mapping.lookup(yieldVal));
+  }
+  newYieldOperands.push_back(vecIterArg);
+  scf::YieldOp::create(builder, loc, newYieldOperands);
+
+  // After the loop: create the final vector.reduction
+  builder.setInsertionPointAfter(newForOp);
+  Value finalVec = newForOp.getResults().back();
+
+  // Create the post-loop scalar reduction (without accumulator)
+  auto postReduction = vector::ReductionOp::create(builder, loc, kind,
+                                                    finalVec);
+
+  // If there was a type cast chain (truncf before, extf after),
+  // we need to extf the scalar result to match the store type
+  Value valueToStore = postReduction.getDest();
+  if (info.extAfterReduce) {
+    Type storeType = info.extAfterReduce.getOut().getType();
+    auto extResult =
+        arith::ExtFOp::create(builder, loc, storeType, valueToStore);
+    valueToStore = extResult.getResult();
+  }
+
+  // Store the final result
+  SmallVector<Value> storeIndices(info.resultStore.getIndices().begin(),
+                                  info.resultStore.getIndices().end());
+  // Remap any indices that came from the loop (unlikely for this pattern,
+  // but be safe)
+  SmallVector<Value> remappedIndices;
+  for (Value idx : storeIndices) {
+    if (mapping.contains(idx))
+      remappedIndices.push_back(mapping.lookup(idx));
+    else
+      remappedIndices.push_back(idx);
+  }
+
+  // The store memref is defined outside the loop, so no remapping needed
+  memref::StoreOp::create(builder, loc, valueToStore,
+                           info.resultStore.getMemRef(), remappedIndices);
+
+  // If there was an init store, remove it (the vector constant replaces it)
+  if (info.initStore) {
+    info.initStore.erase();
+  }
+
+  // Also remove the alloc for the scalar accumulator if it has no remaining
+  // users after we remove the loop
+  Value accumMemref = info.accLoad.getMemRef();
+
+  // Replace old loop results (excluding our new vec result) with new loop
+  // results
+  for (unsigned i = 0; i < forOp.getNumResults(); ++i) {
+    forOp.getResult(i).replaceAllUsesWith(newForOp.getResult(i));
+  }
+  forOp.erase();
+
+  // Clean up the scalar accumulator alloc if unused
+  if (auto allocOp = accumMemref.getDefiningOp<memref::AllocOp>()) {
+    if (allocOp->use_empty()) {
+      allocOp.erase();
+    }
+  }
+
+  return success();
+}
+
+DiagnosedSilenceableFailure transform::HoistVectorReductionOp::apply(
+    transform::TransformRewriter &rewriter,
+    transform::TransformResults &results, transform::TransformState &state) {
+
+  SmallVector<Operation *> targets =
+      llvm::to_vector(state.getPayloadOps(getTarget()));
+
+  if (targets.empty()) {
+    results.set(llvm::cast<OpResult>(getResult()), ArrayRef<Operation *>());
+    return DiagnosedSilenceableFailure::success();
+  }
+
+  SmallVector<Operation *> transformedOps;
+  int numTransformations = 0;
+
+  for (Operation *target : targets) {
+    // Collect all scf.for ops that match the pattern
+    // Collect first, transform later to avoid iterator invalidation
+    SmallVector<ReductionHoistInfo> hoistInfos;
+
+    target->walk([&](scf::ForOp forOp) {
+      if (auto info = matchReductionInLoop(forOp)) {
+        hoistInfos.push_back(*info);
+      }
+    });
+
+    // Apply transformations (process in reverse order to handle nested loops
+    // correctly, but for softmax the loops are siblings so order doesn't matter)
+    for (auto &info : llvm::reverse(hoistInfos)) {
+      OpBuilder builder(info.forOp);
+      if (succeeded(hoistReduction(info, builder))) {
+        numTransformations++;
+      }
+    }
+
+    transformedOps.push_back(target);
+  }
+
+  LLVM_DEBUG(llvm::dbgs() << "Hoisted " << numTransformations
+                          << " vector.reduction operations out of loops\n");
+
+  results.set(llvm::cast<OpResult>(getResult()), transformedOps);
+  return DiagnosedSilenceableFailure::success();
+}
+
+void transform::HoistVectorReductionOp::getEffects(
+    SmallVectorImpl<MemoryEffects::EffectInstance> &effects) {
+  consumesHandle(getTargetMutable(), effects);
+  producesHandle(getOperation()->getOpResults(), effects);
+  modifiesPayload(effects);
+}
+
+//===----------------------------------------------------------------------===//
 
 namespace xilinx {
 namespace air {
