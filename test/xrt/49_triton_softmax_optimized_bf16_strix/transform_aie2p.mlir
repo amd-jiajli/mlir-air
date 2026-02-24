@@ -278,5 +278,20 @@ transform.with_pdl_patterns {
             transform.apply_patterns.vector.lower_multi_reduction lowering_strategy = "innerreduction"
         } : !pdl.operation
         transform.apply_cse to %func7_transformed : !pdl.operation
+
+        //===================================================================
+        // PHASE 11: Hoist Vector Reductions Out of Loops
+        //===================================================================
+        // PURPOSE: Convert scalar vector.reduction accumulation inside loops
+        // to vector element-wise accumulation with a single post-loop reduction.
+        // This eliminates 32 expensive horizontal reductions per loop, replacing
+        // them with fast vector element-wise operations + 1 final reduction.
+
+        %func8 = transform.structured.match ops{["func.func"]} in %arg1 : (!pdl.operation) -> !pdl.operation
+        %func8_hoisted = transform.air.hoist_vector_reduction %func8
+        transform.apply_patterns to %func8_hoisted {
+            transform.apply_patterns.canonicalization
+        } : !pdl.operation
+        transform.apply_cse to %func8_hoisted : !pdl.operation
     }
 }

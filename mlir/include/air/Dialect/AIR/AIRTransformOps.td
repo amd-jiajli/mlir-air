@@ -1402,4 +1402,65 @@ def ConvertSize1VectorToScalarOp : Op<Transform_Dialect, "air.convert_size1_vect
   let assemblyFormat = "$target attr-dict";
 }
 
+def HoistVectorReductionOp : Op<Transform_Dialect, "air.hoist_vector_reduction",
+    [FunctionalStyleTransformOpTrait, MemoryEffectsOpInterface,
+     DeclareOpInterfaceMethods<TransformOpInterface>,
+     DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
+  let summary = "Hoist vector.reduction operations out of scf.for loops using vector iter_args";
+  let description = [{
+    This transform identifies `scf.for` loops containing `vector.reduction` operations
+    where the reduction accumulator is a scalar loaded from memory before each iteration
+    and stored back after. It restructures the loop to use vector-width `iter_args`
+    accumulation with a single post-loop scalar reduction, which is significantly more
+    efficient on AIE hardware.
+
+    This transformation maintains 1D vectors throughout (no 2D vectors), which is
+    required for AIE compatibility.
+
+    Pattern matched:
+    ```mlir
+    memref.store %init, %alloc[%idx]  // Initialize accumulator
+    scf.for %i = ... {
+      %vec = vector.transfer_read ... : vector<Nxbf16>
+      %acc = memref.load %alloc[%idx] : f32       // Load scalar accumulator
+      %acc_cast = arith.truncf %acc : f32 to bf16  // Optional: cast to reduction type
+      %result = vector.reduction <kind>, %vec, %acc_cast : vector<Nxbf16> into bf16
+      %result_cast = arith.extf %result : bf16 to f32  // Optional: cast back
+      memref.store %result_cast, %alloc[%idx] : f32    // Store updated accumulator
+    }
+    ```
+
+    Transformed to:
+    ```mlir
+    %init_vec = arith.constant dense<init_value> : vector<Nxbf16>
+    %final_vec = scf.for %i = ... iter_args(%acc_vec = %init_vec) -> vector<Nxbf16> {
+      %vec = vector.transfer_read ... : vector<Nxbf16>
+      %new_acc = arith.<elementwise_op> %vec, %acc_vec : vector<Nxbf16>
+      scf.yield %new_acc : vector<Nxbf16>
+    }
+    %scalar = vector.reduction <kind>, %final_vec : vector<Nxbf16> into bf16
+    %scalar_cast = arith.extf %scalar : bf16 to f32  // If original stored as f32
+    memref.store %scalar_cast, %alloc[%idx] : f32
+    ```
+
+    Supported reduction kinds and their vector operation replacements:
+    - `add` -> `arith.addf` / `arith.addi`
+    - `mul` -> `arith.mulf` / `arith.muli`
+    - `maxnumf` -> `arith.maximumf`
+    - `minnumf` -> `arith.minimumf`
+    - `maxsi` -> `arith.maxsi`
+    - `minsi` -> `arith.minsi`
+
+    The target operand should be an operation with IsolatedFromAbove trait
+    (e.g., func.func, air.herd). The transform walks all `scf.for` loops within
+    and hoists qualifying vector.reduction operations.
+
+    Returns a handle to the (possibly transformed) target operation.
+  }];
+
+  let arguments = (ins PDL_Operation:$target);
+  let results = (outs PDL_Operation:$result);
+  let assemblyFormat = "$target attr-dict";
+}
+
 #endif // AIR_TRANSFORM_OPS
