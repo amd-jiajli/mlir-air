@@ -51,3 +51,7 @@ docs_ai_generated/
 # build
 my_install/
 build_peano/
+
+# claude
+CLAUDE.md
+.claude/
