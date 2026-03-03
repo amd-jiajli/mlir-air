@@ -37,3 +37,17 @@ libadf.a
 *.elf
 *.elf.*
 CLAUDE.md
+
+# cline
+.cline_storage/
+.clinerules/
+
+# vscode
+.vscode/
+
+## ai_docs
+docs_ai_generated/
+
+# build
+my_install/
+build_peano/
