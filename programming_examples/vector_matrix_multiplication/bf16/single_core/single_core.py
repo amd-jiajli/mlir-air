@@ -11,6 +11,7 @@ from air.dialects.memref import AllocOp, DeallocOp, load, store
 from air.dialects.func import FuncOp, CallOp
 from air.dialects.scf import for_, yield_
 from air.backend.xrt_runner import XRTRunner, type_mapper
+from air.backend.xrt import XRTBackend
 
 range_ = for_
 
@@ -309,6 +310,14 @@ if __name__ == "__main__":
         dest="output_format",
         help="Output format for the compiled binary (default: xclbin)",
     )
+    parser.add_argument(
+        "--compile-mode",
+        type=str,
+        choices=["compile-and-run", "compile-and-xclbin"],
+        dest="compile_mode",
+        default="compile-and-run",
+        help="compile-and-run (default): compile and validate; compile-and-xclbin: generate xclbin only",
+    )
 
     args = parser.parse_args()
 
@@ -324,23 +333,34 @@ if __name__ == "__main__":
         print(mlir_module)
         exit(0)
 
-    input_a = np.arange(0, args.k, dtype=INPUT_DATATYPE)
-    input_b = np.arange(0, args.k * args.n, dtype=INPUT_DATATYPE).reshape(
-        args.k, args.n
-    )
-    output_c = np.dot(input_a.astype(OUTPUT_DATATYPE), input_b.astype(OUTPUT_DATATYPE))
-
-    runner = XRTRunner(
-        verbose=args.verbose,
-        omit_while_true_loop=False,
-        output_format=args.output_format,
-        instance_name="vecmat_bf16",
-    )
-    exit(
-        runner.run_test(
-            mlir_module,
-            inputs=[input_a, input_b],
-            expected_outputs=[output_c],
-            rtol=1e0,
+    if args.compile_mode == "compile-and-run":
+        input_a = np.arange(0, args.k, dtype=INPUT_DATATYPE)
+        input_b = np.arange(0, args.k * args.n, dtype=INPUT_DATATYPE).reshape(
+            args.k, args.n
         )
-    )
+        output_c = np.dot(
+            input_a.astype(OUTPUT_DATATYPE), input_b.astype(OUTPUT_DATATYPE)
+        )
+
+        runner = XRTRunner(
+            verbose=args.verbose,
+            omit_while_true_loop=False,
+            output_format=args.output_format,
+            instance_name="vecmat_bf16",
+        )
+        exit(
+            runner.run_test(
+                mlir_module,
+                inputs=[input_a, input_b],
+                expected_outputs=[output_c],
+                rtol=1e0,
+            )
+        )
+
+    elif args.compile_mode == "compile-and-xclbin":
+        backend = XRTBackend(
+            verbose=args.verbose,
+            omit_while_true_loop=False,
+        )
+        module_function = backend.compile(mlir_module)
+        backend.unload()
