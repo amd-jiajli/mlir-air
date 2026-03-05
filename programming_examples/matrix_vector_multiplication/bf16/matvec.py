@@ -33,9 +33,9 @@ range_ = for_
 
 @module_builder
 def build_module(m, k, tile_m_l2, m_input, num_cores, np_dtype_in, np_dtype_out):
-    assert m % (tile_m_l2 * num_cores) == 0, (
-        f"M ({m}) must be divisible by tile_m_l2*num_cores ({tile_m_l2*num_cores})"
-    )
+    assert (
+        m % (tile_m_l2 * num_cores) == 0
+    ), f"M ({m}) must be divisible by tile_m_l2*num_cores ({tile_m_l2*num_cores})"
     assert (
         tile_m_l2 % m_input == 0
     ), f"tile_m_l2 ({tile_m_l2}) must be divisible by m_input ({m_input})"
@@ -170,9 +170,7 @@ def build_module(m, k, tile_m_l2, m_input, num_cores, np_dtype_in, np_dtype_out)
                     operands=[l1_c_data],
                 )
                 def herd_body(_tx, _ty, _sx, _sy, _l1_c):
-                    zero_const = ConstantOp(
-                        FloatAttr.get(xrt_dtype_out, 0), None
-                    )
+                    zero_const = ConstantOp(FloatAttr.get(xrt_dtype_out, 0), None)
                     CallOp(linalg_fill_func, [zero_const, _l1_c])
 
                 herd_body.attributes["link_with"] = StringAttr.get("mv.o")
@@ -192,8 +190,16 @@ def build_module(m, k, tile_m_l2, m_input, num_cores, np_dtype_in, np_dtype_out)
                     ],
                 )
                 def herd_body(
-                    _tx, _ty, _sx, _sy,
-                    _l1_a, _l1_b, _l1_c, _l2_a, _l3_b, _l3_c,
+                    _tx,
+                    _ty,
+                    _sx,
+                    _sy,
+                    _l1_a,
+                    _l1_b,
+                    _l1_c,
+                    _l2_a,
+                    _l3_b,
+                    _l3_c,
                     _launch_offset_m,
                 ):
                     # DMA B: L3 → L1 (each core loads independently)
@@ -223,9 +229,7 @@ def build_module(m, k, tile_m_l2, m_input, num_cores, np_dtype_in, np_dtype_out)
                                 )
                             ],
                         )
-                        l2_a_row_offset = affine_apply(
-                            l2_a_offset_map, [_tx, j_m]
-                        )
+                        l2_a_row_offset = affine_apply(l2_a_offset_map, [_tx, j_m])
 
                         # DMA A: L2 → L1
                         dma_memcpy_nd(
@@ -238,18 +242,10 @@ def build_module(m, k, tile_m_l2, m_input, num_cores, np_dtype_in, np_dtype_out)
 
                         # Kernel row_offset within per-core C: j_m * m_input
                         kernel_row_map = make_scale_map(m_input)
-                        kernel_row_offset = affine_apply(
-                            kernel_row_map, [j_m]
-                        )
-                        row_offset_i32 = arith.index_cast(
-                            T.i32(), kernel_row_offset
-                        )
-                        m_const = ConstantOp(
-                            IntegerAttr.get(T.i32(), m_input), None
-                        )
-                        k_const = ConstantOp(
-                            IntegerAttr.get(T.i32(), k), None
-                        )
+                        kernel_row_offset = affine_apply(kernel_row_map, [j_m])
+                        row_offset_i32 = arith.index_cast(T.i32(), kernel_row_offset)
+                        m_const = ConstantOp(IntegerAttr.get(T.i32(), m_input), None)
+                        k_const = ConstantOp(IntegerAttr.get(T.i32(), k), None)
 
                         CallOp(
                             matvec_func,
@@ -397,7 +393,6 @@ if __name__ == "__main__":
         runner = XRTRunner(
             verbose=args.verbose,
             omit_while_true_loop=False,
-            omit_auto_broadcast=(args.num_cores > 1),
             output_format=args.output_format,
             instance_name="matvec_bf16",
         )
@@ -415,7 +410,6 @@ if __name__ == "__main__":
         backend = XRTBackend(
             verbose=args.verbose,
             omit_while_true_loop=False,
-            omit_auto_broadcast=(args.num_cores > 1),
         )
         module_function = backend.compile(mlir_module)
         backend.unload()

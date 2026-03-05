@@ -180,6 +180,19 @@ air::cloneAffineIfUsingRemap(OpBuilder builder, IRMapping &remap,
     clonedOps.insert(clonedOps.end(), clonedElseOps.begin(),
                      clonedElseOps.end());
   }
+  // Map the affine.if results to the corresponding yield operand values
+  // (looked up through remap). The affine.if yields tokens via affine.yield
+  // terminators; since we extracted ops instead of cloning the affine.if,
+  // downstream ops that depend on the affine.if results need the remap
+  // to resolve correctly.
+  if (aif_op.getNumResults() > 0) {
+    auto *thenTerminator = aif_op.getThenBlock()->getTerminator();
+    for (unsigned i = 0; i < aif_op.getNumResults(); i++) {
+      Value yieldedVal = thenTerminator->getOperand(i);
+      Value remappedVal = remap.lookupOrDefault(yieldedVal);
+      remap.map(aif_op.getResult(i), remappedVal);
+    }
+  }
   return clonedOps;
 }
 
