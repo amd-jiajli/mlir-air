@@ -31,17 +31,18 @@ M ?= 2048
 K ?= 8192
 TILE_M_L2 ?= 4
 M_INPUT ?= 1
+NUM_CORES ?= 1
 
 all: run
 
 print:
-	${powershell} python3 ${srcdir}/matvec.py $(OUTPUT_FORMAT_FLAG) -p --m $(M) --k $(K) --tile-m-l2 $(TILE_M_L2) --m-input $(M_INPUT)
+	${powershell} python3 ${srcdir}/matvec.py $(OUTPUT_FORMAT_FLAG) -p --m $(M) --k $(K) --tile-m-l2 $(TILE_M_L2) --m-input $(M_INPUT) --num-cores $(NUM_CORES)
 
 run: compile-kernel
-	PEANO_INSTALL_DIR=$(PEANO_INSTALL_DIR) cd $(BUILD_DIR) && ${powershell} python3 ${srcdir}/matvec.py $(OUTPUT_FORMAT_FLAG) --m $(M) --k $(K) --tile-m-l2 $(TILE_M_L2) --m-input $(M_INPUT)
+	PEANO_INSTALL_DIR=$(PEANO_INSTALL_DIR) cd $(BUILD_DIR) && ${powershell} python3 ${srcdir}/matvec.py $(OUTPUT_FORMAT_FLAG) --m $(M) --k $(K) --tile-m-l2 $(TILE_M_L2) --m-input $(M_INPUT) --num-cores $(NUM_CORES)
 
 profile: compile-kernel build-test-exe
-	PEANO_INSTALL_DIR=$(PEANO_INSTALL_DIR) cd $(BUILD_DIR) && python3 ${srcdir}/matvec.py $(OUTPUT_FORMAT_FLAG) --compile-mode compile-and-xclbin --m $(M) --k $(K) --tile-m-l2 $(TILE_M_L2) --m-input $(M_INPUT)
+	PEANO_INSTALL_DIR=$(PEANO_INSTALL_DIR) cd $(BUILD_DIR) && python3 ${srcdir}/matvec.py $(OUTPUT_FORMAT_FLAG) --compile-mode compile-and-xclbin --m $(M) --k $(K) --tile-m-l2 $(TILE_M_L2) --m-input $(M_INPUT) --num-cores $(NUM_CORES)
 	PEANO_INSTALL_DIR=$(PEANO_INSTALL_DIR) cd $(BUILD_DIR) && ./test.exe -x air.xclbin -k MLIR_AIE -i air.insts.bin -M $(M) -K $(K)
 
 # Convenience targets matching IRON GEMV test shapes
@@ -58,6 +59,21 @@ run2:
 
 profile2:
 	$(MAKE) profile M=8192 K=2048 TILE_M_L2=16 M_INPUT=4
+
+# Multi-core targets (8 cores)
+# Case 1 multi: M=2048, K=8192, 8 cores (L2: 8*2*8192*2=256KB)
+run1_multi:
+	$(MAKE) run M=2048 K=8192 TILE_M_L2=2 M_INPUT=1 NUM_CORES=8
+
+profile1_multi:
+	$(MAKE) profile M=2048 K=8192 TILE_M_L2=2 M_INPUT=1 NUM_CORES=8
+
+# Case 2 multi: M=8192, K=2048, 8 cores (L2: 8*4*2048*2=128KB + 4KB B = 132KB)
+run2_multi:
+	$(MAKE) run M=8192 K=2048 TILE_M_L2=4 M_INPUT=1 NUM_CORES=8
+
+profile2_multi:
+	$(MAKE) profile M=8192 K=2048 TILE_M_L2=4 M_INPUT=1 NUM_CORES=8
 
 build-test-exe:
 	@GPP=$$( \
