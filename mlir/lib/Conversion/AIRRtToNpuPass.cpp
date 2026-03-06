@@ -20,6 +20,7 @@
 #include "mlir/Dialect/Affine/LoopUtils.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
+#include "mlir/Dialect/SCF/Transforms/Transforms.h"
 #include "mlir/Dialect/SCF/Utils/Utils.h"
 #include "mlir/Interfaces/LoopLikeInterface.h"
 #include "mlir/Pass/Pass.h"
@@ -328,24 +329,34 @@ struct DmaToNpuPattern : public OpConversionPattern<airrt::DmaMemcpyNdOp> {
         return failure();
     }
 
-    // Get static offsets
+    // Get static offsets. Non-constant offsets indicate an unresolved loop
+    // induction variable (e.g., from an unhandled scf.forall). Warn so that
+    // such bugs are caught early instead of silently producing wrong results.
     SmallVector<int64_t> staticOffsets;
     if (auto const_int = getConstantIntValue(adaptor.getOffset3()))
       staticOffsets.push_back(*const_int);
-    else
+    else {
+      op->emitWarning("non-constant DMA offset (dim 3) defaulting to 0");
       staticOffsets.push_back(0);
+    }
     if (auto const_int = getConstantIntValue(adaptor.getOffset2()))
       staticOffsets.push_back(*const_int);
-    else
+    else {
+      op->emitWarning("non-constant DMA offset (dim 2) defaulting to 0");
       staticOffsets.push_back(0);
+    }
     if (auto const_int = getConstantIntValue(adaptor.getOffset1()))
       staticOffsets.push_back(*const_int);
-    else
+    else {
+      op->emitWarning("non-constant DMA offset (dim 1) defaulting to 0");
       staticOffsets.push_back(0);
+    }
     if (auto const_int = getConstantIntValue(adaptor.getOffset0()))
       staticOffsets.push_back(*const_int);
-    else
+    else {
+      op->emitWarning("non-constant DMA offset (dim 0) defaulting to 0");
       staticOffsets.push_back(0);
+    }
 
     // Get static sizes
     SmallVector<int64_t> staticSizes;
@@ -1346,12 +1357,44 @@ struct AIRRtToNpuPass : public impl::AIRRtToNpuBase<AIRRtToNpuPass> {
     // Remove any duplicate shim dma allocations
     purgeDuplicateShimDmaAllocs(module);
 
-    // Simplify affine apply ops
     auto ctx = &getContext();
+
+    // Convert any surviving scf.forall ops to scf.for before unrolling.
+    // scf.forall is not handled by the loop unrolling passes below and would
+    // leave dynamic induction variables that DmaToNpuPattern silently zeros.
+    {
+      SmallVector<scf::ForallOp> forallOps;
+      module.walk([&](scf::ForallOp op) { forallOps.push_back(op); });
+      if (!forallOps.empty()) {
+        IRRewriter rewriter(ctx);
+        for (auto forallOp : forallOps) {
+          if (failed(scf::forallToForLoop(rewriter, forallOp))) {
+            forallOp->emitOpError("failed to convert forall to for loop");
+            signalPassFailure();
+            return;
+          }
+        }
+      }
+    }
 
     // Unroll for loops
     unrollAffineFors(module);
     unrollSCFFors(module);
+
+    // Fold affine.apply ops with constant operands after loop unrolling.
+    // After unrolling, induction variables become constants, but
+    // affine.apply(constant) is not automatically folded. Without this,
+    // DmaToNpuPattern's getConstantIntValue() fails and defaults offsets to 0.
+    {
+      RewritePatternSet affinePatterns(ctx);
+      affine::AffineApplyOp::getCanonicalizationPatterns(affinePatterns, ctx);
+      if (failed(applyPatternsGreedily(module, std::move(affinePatterns)))) {
+        module.emitError("failed to canonicalize affine.apply ops after loop "
+                         "unrolling");
+        signalPassFailure();
+        return;
+      }
+    }
 
     // Convert WaitAllOp → NpuDmaWaitOp and purge DMA async tokens.
     // This must happen BEFORE DMA conversion because:
@@ -1444,6 +1487,10 @@ struct AIRRtToNpuPass : public impl::AIRRtToNpuBase<AIRRtToNpuPass> {
     if (failed(applyPartialConversion(module, target,
                                       std::move(funcToSeqPatterns))))
       signalPassFailure();
+
+    // Create a lightweight copy of the segment device (without core
+    // bodies/ELFs) and redirect between-iteration load_pdi to it.
+    createLightweightResetDevice(module);
 
     // Generate main device wrapper if needed. This handles two mutually
     // exclusive cases:
@@ -1714,6 +1761,68 @@ struct AIRRtToNpuPass : public impl::AIRRtToNpuBase<AIRRtToNpuPass> {
 
     // Clear the pending request
     pendingMainDevice = std::nullopt;
+  }
+
+  // Create a lightweight device clone for between-iteration load_pdi.
+  // The clone has the same DMA BDs, locks, and switches but empty core
+  // bodies (no ELFs). The between-iteration load_pdi references this
+  // clone, so aie-expand-load-pdi generates a PDI without ELF data.
+  void createLightweightResetDevice(ModuleOp module) {
+    SmallVector<std::pair<AIE::DeviceOp, std::string>> devicesToClone;
+    module.walk([&](AIE::DeviceOp device) {
+      if (!deviceHasRepeatCountDMAs(device))
+        return;
+      if (device.getSymName().empty())
+        return;
+      devicesToClone.push_back({device, device.getSymName().str()});
+    });
+
+    for (auto &[device, origName] : devicesToClone) {
+      std::string resetName = origName + "_reset";
+      OpBuilder builder(device);
+      auto clone = cast<AIE::DeviceOp>(builder.clone(*device));
+      clone.setSymName(resetName);
+
+      // Strip core bodies and attributes from the clone, and remove
+      // runtime_sequence. CoreOps are kept (empty, no elf_file,
+      // no link_with) so that initLocks does core reset/unreset and
+      // addCoreEnable re-enables cores. aiecc.py skips compilation
+      // for cores without link_with/elf_file.
+      SmallVector<AIE::RuntimeSequenceOp> seqsToErase;
+      clone.walk([&](AIE::RuntimeSequenceOp op) { seqsToErase.push_back(op); });
+      for (auto op : seqsToErase)
+        op->erase();
+
+      SmallVector<xilinx::AIE::CoreOp> coresToReplace;
+      clone.walk([&](xilinx::AIE::CoreOp coreOp) {
+        coresToReplace.push_back(coreOp);
+      });
+      for (auto coreOp : coresToReplace) {
+        OpBuilder b(coreOp);
+        Value tile = coreOp.getTile();
+        auto newCore = xilinx::AIE::CoreOp::create(b, coreOp.getLoc(), tile);
+        Block *body = b.createBlock(&newCore.getBody());
+        b.setInsertionPointToEnd(body);
+        xilinx::AIE::EndOp::create(b, coreOp.getLoc());
+        LLVM_DEBUG(llvm::dbgs()
+                   << "Created empty CoreOp in reset device for tile: " << tile
+                   << "\n");
+        coreOp->erase();
+      }
+
+      // Redirect between-iteration load_pdi to the clone
+      AIE::RuntimeSequenceOp runtimeSeq = nullptr;
+      device.walk([&](AIE::RuntimeSequenceOp seq) { runtimeSeq = seq; });
+      if (!runtimeSeq)
+        continue;
+      auto resetRef = FlatSymbolRefAttr::get(module.getContext(), resetName);
+      runtimeSeq.walk([&](AIEX::NpuLoadPdiOp op) {
+        if (auto ref = op.getDeviceRefAttr()) {
+          if (ref.getValue() == origName)
+            op.setDeviceRefAttr(resetRef);
+        }
+      });
+    }
   }
 
   // Convert WaitAllOp → NpuDmaWaitOp and purge DMA async tokens.
